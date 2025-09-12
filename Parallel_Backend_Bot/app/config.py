@@ -1,6 +1,5 @@
 import os
 from dotenv import load_dotenv
-
 load_dotenv()
 
 class Settings:
@@ -12,5 +11,14 @@ class Settings:
 
     REDIS_HOST: str = os.getenv("REDIS_HOST", "redis")
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
+
+    # IBKR settings
+    IB_HOST: str = os.getenv("IB_HOST", "host.docker.internal")
+    IB_PORT: int = int(os.getenv("IB_PORT", 7497))
+    IB_CLIENT_ID: int = int(os.getenv("IB_CLIENT_ID", 42))
+    IB_RTH_DEFAULT: bool = os.getenv("IB_RTH_DEFAULT", "true").lower() == "true"
+    IB_CONNECT_TIMEOUT: float = float(os.getenv("IB_CONNECT_TIMEOUT", 6.0))
+    IB_RECONNECT_BACKOFF_SECONDS: float = float(os.getenv("IB_RECONNECT_BACKOFF_SECONDS", 3.0))
+    IB_MARKETDATA_DELAY: float = float(os.getenv("IB_MARKETDATA_DELAY", 1.5))
 
 settings = Settings()

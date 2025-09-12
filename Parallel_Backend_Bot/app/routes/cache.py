@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from app.schemas.cache_schema import CacheRequest
 from app.controllers.cache_controller import cache_set, cache_get, cache_del
 
-router = APIRouter(prefix="/cache")
+router = APIRouter(prefix="/cache", tags=["Cache"])
 
 @router.post("/set", summary="Set a cache key", response_description="Cache key stored with TTL")
 async def set_cache(req: CacheRequest):

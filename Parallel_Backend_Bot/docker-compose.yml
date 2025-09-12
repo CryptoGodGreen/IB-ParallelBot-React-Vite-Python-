@@ -1,7 +1,7 @@
 
 services:
   postgres:
-    image: postgres:15-alpine
+    image: postgres:15.3-alpine
     container_name: postgres
     restart: unless-stopped
     environment:
@@ -21,7 +21,7 @@ services:
       - appnet
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.2-alpine
     container_name: redis
     restart: unless-stopped
     ports:
@@ -52,11 +52,23 @@ services:
       - POSTGRES_PORT=${POSTGRES_PORT}
       - REDIS_HOST=${REDIS_HOST}
       - REDIS_PORT=${REDIS_PORT}
+      - IB_HOST=${IB_HOST}
+      - IB_PORT=${IB_PORT}
+      - IB_CLIENT_ID=${IB_CLIENT_ID}
+      - IB_RTH_DEFAULT=${IB_RTH_DEFAULT}
+      - IB_CONNECT_TIMEOUT=${IB_CONNECT_TIMEOUT}
+      - IB_RECONNECT_BACKOFF_SECONDS=${IB_RECONNECT_BACKOFF_SECONDS}
+      - IB_MARKETDATA_DELAY=${IB_MARKETDATA_DELAY}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - SQL_LOG_LEVEL=${SQL_LOG_LEVEL}
+      - LOG_FORMAT=${LOG_FORMAT}
     ports:
       - "8000:8000"
     volumes:
       - ./app:/app/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - appnet
 

@@ -7,10 +7,6 @@ from app.utils.security import get_current_user
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
-@router.post("/signup")
-async def signup(user: UserCreate, db: AsyncSession = Depends(get_db)):
-    return await user_controller.signup(user, db)
-
 @router.post("/login")
 async def login(user: UserLogin, db: AsyncSession = Depends(get_db)):
     return await user_controller.login(user, db)
