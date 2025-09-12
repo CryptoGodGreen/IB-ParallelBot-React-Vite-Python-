@@ -1,0 +1,17 @@
+export const SYMBOLS = [
+{ symbol: "AAPL", name: "Apple Inc.", exchange: "NASDAQ" },
+{ symbol: "GOOGL", name: "Alphabet Inc.", exchange: "NASDAQ" },
+{ symbol: "MSFT", name: "Microsoft Corporation", exchange: "NASDAQ" },
+{ symbol: "AMZN", name: "Amazon.com, Inc.", exchange: "NASDAQ" },
+{ symbol: "TSLA", name: "Tesla, Inc.", exchange: "NASDAQ" },
+{ symbol: "NVDA", name: "NVIDIA Corporation", exchange: "NASDAQ" },
+{ symbol: "META", name: "Meta Platforms, Inc.", exchange: "NASDAQ" },
+{ symbol: "NFLX", name: "Netflix, Inc.", exchange: "NASDAQ" },
+{ symbol: "AMD", name: "Advanced Micro Devices, Inc.", exchange: "NASDAQ" },
+{ symbol: "INTC", name: "Intel Corporation", exchange: "NASDAQ" },
+{ symbol: "BRK.B", name: "Berkshire Hathaway Inc. Class B", exchange: "NYSE" },
+{ symbol: "JPM", name: "JPMorgan Chase & Co.", exchange: "NYSE" },
+{ symbol: "V", name: "Visa Inc.", exchange: "NYSE" },
+{ symbol: "MA", name: "Mastercard Incorporated", exchange: "NYSE" },
+{ symbol: "PYPL", name: "PayPal Holdings, Inc.", exchange: "NASDAQ" },
+];

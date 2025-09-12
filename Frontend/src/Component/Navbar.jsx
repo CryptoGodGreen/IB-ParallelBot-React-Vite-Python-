@@ -1,11 +1,12 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import logo from "../assets/logo.jpg";
 import toast from "react-hot-toast";
-import { useContext, useState, useRef, useEffect } from "react";
+import { useContext, useRef, useEffect, useState } from "react";
 import { AuthContext } from "../context/AuthContext";
-import { FaUserCircle } from "react-icons/fa";
+import { FaUserCircle, FaBars, FaChevronDown } from "react-icons/fa";
+import SearchAutocomplete from "./SearchAutocomplete";
 
-function Navbar() {
+export default function Navbar({ isSidebarOpen, toggleSidebar }) {
   const navigate = useNavigate();
   const { isAuthenticated, setIsAuthenticated } = useContext(AuthContext);
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -29,81 +30,89 @@ function Navbar() {
   }, []);
 
   return (
-    <nav className="flex justify-between items-center p-4 bg-slate-800 text-white shadow-md">
-      {/* Logo */}
-      <div className="text-xl font-bold">
-        <NavLink to="/">
-          <img
-            src={logo}
-            alt="Logo"
-            className="h-12 rounded-sm hover:scale-105 transition-transform duration-200"
-          />
-        </NavLink>
-      </div>
+    <nav className="fixed top-0 inset-x-0 z-40 shadow-xl">
+      <div className="relative">
+        {/* Gradient bar */}
+        <div className="absolute inset-0 bg-gradient-to-r from-blue-600 via-indigo-600 to-fuchsia-600 opacity-80 blur-md"></div>
+        <div className="relative backdrop-blur-sm bg-slate-900/70 border-b border-slate-800">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+            {/* Left: Menu + Logo */}
+            <div className="flex items-center gap-3">
+              <button
+                onClick={toggleSidebar}
+                className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700"
+                aria-label="Toggle sidebar"
+              >
+                <FaBars />
+              </button>
+              <NavLink to="/" className="flex items-center gap-2">
+                <img src={logo} alt="Logo" className="h-9 w-9 rounded-md shadow" />
+                <span className="hidden sm:inline font-extrabold tracking-tight text-white">PB Terminal</span>
+              </NavLink>
+            </div>
 
-      {/* Right side */}
-      <div className="flex items-center gap-4">
-        {!isAuthenticated ? (
-          <NavLink
-            to="/login"
-            className="bg-blue-600 px-4 py-2 rounded-lg hover:bg-blue-500 transition-colors"
-          >
-            Login
-          </NavLink>
-        ) : (
-          <div className="relative" ref={dropdownRef}>
-            {/* Profile Icon */}
-            <button
-              onClick={() => setDropdownOpen(!dropdownOpen)}
-              className="flex items-center focus:outline-none"
-            >
-              <FaUserCircle className="text-3xl cursor-pointer text-gray-300 hover:text-blue-500 transition-colors" />
-            </button>
+            {/* Center: Search */}
+            <div className="flex-1 flex justify-center">
+              <SearchAutocomplete onPicked={() => { /* navigate handled inside */ }} />
+            </div>
 
-            {/* Dropdown */}
-            {dropdownOpen && (
-              <div className="absolute right-0 mt-3 w-52 bg-white text-gray-800 rounded-xl shadow-lg border border-gray-200 transition-all duration-200 ease-in-out transform origin-top scale-95 animate-fadeIn">
+            {/* Right: Auth */}
+            <div className="flex items-center gap-2">
+              {!isAuthenticated ? (
                 <NavLink
-                  to="/profile"
-                  className={({ isActive }) =>
-                    `block px-4 py-3 transition-colors ${
-                      isActive
-                        ? "bg-blue-100 text-blue-600 font-medium"
-                        : "hover:bg-blue-50 hover:text-blue-600"
-                    }`
-                  }
-                  onClick={() => setDropdownOpen(false)}
+                  to="/login"
+                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 transition"
                 >
-                  Profile
+                  Login
                 </NavLink>
+              ) : (
+                <div className="relative" ref={dropdownRef}>
+                  <button
+                    onClick={() => setDropdownOpen((p) => !p)}
+                    className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20"
+                  >
+                    <FaUserCircle className="text-2xl" />
+                    <FaChevronDown className="opacity-70" />
+                  </button>
 
-                <NavLink
-                  to="/change-password"
-                  className={({ isActive }) =>
-                    `block px-4 py-3 transition-colors ${
-                      isActive
-                        ? "bg-blue-100 text-blue-600 font-medium"
-                        : "hover:bg-blue-50 hover:text-blue-600"
-                    }`
-                  }
-                  onClick={() => setDropdownOpen(false)}
-                >
-                  Change Password
-                </NavLink>
-
-                <button
-                  onClick={handleLogout}
-                  className="w-full text-left px-4 py-3 bg-red-50 hover:bg-red-100 text-red-600 font-medium transition-colors"
-                >
-                  Logout
-                </button>
-              </div>
-            )}
+                  {dropdownOpen && (
+                    <div className="absolute right-0 mt-2 w-56 card p-2">
+                      <NavLink
+                        to="/profile"
+                        onClick={() => setDropdownOpen(false)}
+                        className={({ isActive }) =>
+                          `block px-3 py-2 rounded-lg ${
+                            isActive ? "bg-blue-600/20 text-blue-300" : "hover:bg-slate-800"
+                          }`
+                        }
+                      >
+                        Profile
+                      </NavLink>
+                      <NavLink
+                        to="/change-password"
+                        onClick={() => setDropdownOpen(false)}
+                        className={({ isActive }) =>
+                          `block px-3 py-2 rounded-lg ${
+                            isActive ? "bg-blue-600/20 text-blue-300" : "hover:bg-slate-800"
+                          }`
+                        }
+                      >
+                        Change Password
+                      </NavLink>
+                      <button
+                        onClick={handleLogout}
+                        className="w-full text-left px-3 py-2 rounded-lg bg-red-600/10 text-red-300 hover:bg-red-600/20"
+                      >
+                        Logout
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
-        )}
+        </div>
       </div>
     </nav>
   );
 }
-
-export default Navbar;

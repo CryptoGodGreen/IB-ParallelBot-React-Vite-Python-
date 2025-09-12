@@ -1,50 +1,126 @@
+// src/pages/ChangePassword.jsx
 import axios from "axios";
-import { useState } from "react";
+import { useState, useRef, forwardRef, useImperativeHandle } from "react";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
 import { FaEye, FaEyeSlash } from "react-icons/fa";
- 
-// Single-file updated ChangePassword component
-// Key behaviors:
-// - Eye toggle button is ALWAYS present in the DOM (prevents double-icon glitch),
-//   but it's visually hidden when the field is empty using opacity + pointer-events.
-// - Validation runs only on submit.
-// - Per-field error clearing on change.
-// - Loading spinner inside the submit button.
- 
+
+/** ---------- Stable child component (module scope) ---------- */
+const PasswordField = forwardRef(function PasswordField(
+  { id, label, value, onChange, show, setShow, error, loading },
+  ref
+) {
+  const inputRef = useRef(null);
+
+  // Expose focus method to parent (optional, handy for validation)
+  useImperativeHandle(ref, () => ({
+    focus: () => inputRef.current?.focus({ preventScroll: true }),
+  }));
+
+  const toggle = () => {
+    // Toggle visibility
+    setShow((p) => ({ ...p, [id]: !p[id] }));
+    // Re-focus + restore caret after type flip
+    requestAnimationFrame(() => {
+      if (!inputRef.current) return;
+      inputRef.current.focus({ preventScroll: true });
+      const len = inputRef.current.value.length;
+      try {
+        inputRef.current.setSelectionRange(len, len);
+      } catch {}
+    });
+  };
+
+  return (
+    <div>
+      <label htmlFor={id} className="block text-sm text-slate-300 mb-1">
+        {label}
+      </label>
+      <div className="relative">
+        <input
+          ref={inputRef}
+          id={id}
+          name={id}
+          autoComplete={id === "new" ? "new-password" : "current-password"}
+          type={show ? "text" : "password"}
+          value={value}
+          onChange={onChange}
+          disabled={loading}
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          onKeyDownCapture={(e) => e.stopPropagation()} // shield from global shortcuts
+          className="w-full px-3 py-2 rounded-xl bg-slate-900/60 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-slate-500"
+          placeholder={label}
+        />
+        <button
+          type="button"
+          aria-label={show ? "Hide password" : "Show password"}
+          onMouseDown={(e) => e.preventDefault()} // don't steal focus
+          onClick={toggle}
+          className={`absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 transition-opacity ${
+            value ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
+          tabIndex={-1}
+        >
+          {show ? <FaEyeSlash /> : <FaEye />}
+        </button>
+      </div>
+      {error && <p className="text-red-400 text-xs mt-1">{error}</p>}
+    </div>
+  );
+});
+/** ---------- end child ---------- */
+
 export default function ChangePassword() {
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
- 
+
   const [errors, setErrors] = useState({});
-  const [showPassword, setShowPassword] = useState({ old: false, new: false, confirm: false });
+  const [showPassword, setShowPassword] = useState({
+    old: false,
+    new: false,
+    confirm: false,
+  });
   const [loading, setLoading] = useState(false);
- 
+
   const navigate = useNavigate();
- 
-  const passwordRegex = /^(?=.*[A-Za-z])(?=.*\d)(?=.*[!@#$%^&*()_\-+=\[\]{};':"\\|,.<>\/?]).{6,}$/;
- 
+
+  const oldRef = useRef(null);
+  const newRef = useRef(null);
+  const confirmRef = useRef(null);
+
+  const passwordRegex =
+    /^(?=.*[A-Za-z])(?=.*\d)(?=.*[!@#$%^&*()_\-+=\[\]{};':"\\|,.<>\/?]).{6,}$/;
+
   const validateForm = () => {
     const next = {};
     if (!oldPassword) next.oldPassword = "Old password is required";
     if (!newPassword) next.newPassword = "New password is required";
     else if (!passwordRegex.test(newPassword))
-      next.newPassword = "Password must be at least 6 chars, include a letter, number & special character";
+      next.newPassword =
+        "Min 6 chars, include a letter, number & special character";
     if (!confirmPassword) next.confirmPassword = "Confirm password is required";
-    else if (confirmPassword !== newPassword) next.confirmPassword = "Passwords do not match";
- 
+    else if (confirmPassword !== newPassword)
+      next.confirmPassword = "Passwords do not match";
+
     setErrors(next);
+    // Focus first error field
+    if (next.oldPassword) oldRef.current?.focus();
+    else if (next.newPassword) newRef.current?.focus();
+    else if (next.confirmPassword) confirmRef.current?.focus();
+
     return Object.keys(next).length === 0;
   };
- 
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!validateForm()) {
       toast.error("Please fix the errors");
       return;
     }
- 
+
     setLoading(true);
     try {
       const response = await axios.post(
@@ -55,118 +131,89 @@ export default function ChangePassword() {
           withCredentials: true,
         }
       );
- 
+
       toast.success(response.data.message || "Password changed successfully!");
-      setTimeout(() => navigate("/profile"), 1200);
+      setTimeout(() => navigate("/profile"), 800);
     } catch (error) {
       console.error(error);
       if (error.response) {
-        toast.error(error.response.data.message || "Failed to change password. Please try again.");
+        toast.error(
+          error.response.data.message ||
+            "Failed to change password. Try again."
+        );
         if (error.response.status === 401) {
           localStorage.removeItem("token");
           toast.error("Session expired. Please login again.");
           navigate("/login");
         }
       } else if (error.request) {
-        toast.error("No response from server. Please check your connection.");
+        toast.error("No response from server. Check your connection.");
       } else {
-        toast.error("Something went wrong. Please try again.");
+        toast.error("Something went wrong. Try again.");
       }
     } finally {
       setLoading(false);
     }
   };
- 
-  // Clear a specific error when user starts typing again
-  const clearError = (key) => {
-    if (!errors[key]) return;
-    setErrors((prev) => ({ ...prev, [key]: "" }));
-  };
- 
-  // Reusable PasswordField component inside the same file
-  function PasswordField({ id, label, value, onChange, show, toggleShow, errorKey }) {
-    // errorKey should be one of: 'oldPassword' | 'newPassword' | 'confirmPassword'
-    return (
-      <div className="mb-4">
-        <div className="relative">
-          <input
-            id={id}
-            name={id}
-            autoComplete={id === "new" ? "new-password" : "current-password"}
-            type={show ? "text" : "password"}
-            placeholder={label}
-            value={value}
-            onChange={(e) => {
-              onChange(e.target.value);
-              clearError(errorKey);
-            }}
-            disabled={loading}
-            className="w-full p-2 border rounded pr-10 outline-none focus:ring-1 focus:ring-blue-300"
-          />
- 
-          {/*
-            The toggle button is ALWAYS in the DOM to avoid mount/unmount glitches
-            but visually hidden when the field is empty using opacity + pointer-events.
-          */}
-          <button
-            type="button"
-            aria-label={show ? "Hide password" : "Show password"}
-            onClick={toggleShow}
-            className={`absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 transition-opacity duration-150 ease-in-out ${
-              value ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
-            }`}
-          >
-            {show ? <FaEyeSlash /> : <FaEye />}
-          </button>
-        </div>
- 
-        {errors[errorKey] && (
-          <p className="text-red-500 text-sm mt-1">{errors[errorKey]}</p>
-        )}
-      </div>
-    );
-  }
- 
+
+  const onFieldChange =
+    (setter, key) =>
+    (e) => {
+      setter(e.target.value);
+      if (errors[key]) setErrors((prev) => ({ ...prev, [key]: "" }));
+    };
+
   return (
-    <div className="flex justify-center items-center min-h-screen bg-gray-50 p-4">
-      <form onSubmit={handleSubmit} className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-        <h2 className="text-2xl mb-4 font-bold">Change Password</h2>
- 
+    <div className="min-h-[calc(100vh-4rem)] grid place-items-center p-4">
+      <form onSubmit={handleSubmit} className="card w-full max-w-md p-6 space-y-4">
+        <div>
+          <h2 className="text-2xl font-bold">Change Password</h2>
+          <p className="text-sm text-slate-400">
+            Keep your account secure with a strong password.
+          </p>
+        </div>
+
         <PasswordField
+          ref={oldRef}
           id="old"
           label="Old Password"
           value={oldPassword}
-          onChange={setOldPassword}
+          onChange={onFieldChange(setOldPassword, "oldPassword")}
           show={showPassword.old}
-          toggleShow={() => setShowPassword((p) => ({ ...p, old: !p.old }))}
-          errorKey="oldPassword"
+          setShow={setShowPassword}
+          error={errors.oldPassword}
+          loading={loading}
         />
- 
         <PasswordField
+          ref={newRef}
           id="new"
           label="New Password"
           value={newPassword}
-          onChange={setNewPassword}
+          onChange={onFieldChange(setNewPassword, "newPassword")}
           show={showPassword.new}
-          toggleShow={() => setShowPassword((p) => ({ ...p, new: !p.new }))}
-          errorKey="newPassword"
+          setShow={setShowPassword}
+          error={errors.newPassword}
+          loading={loading}
         />
- 
         <PasswordField
+          ref={confirmRef}
           id="confirm"
           label="Confirm New Password"
           value={confirmPassword}
-          onChange={setConfirmPassword}
+          onChange={onFieldChange(setConfirmPassword, "confirmPassword")}
           show={showPassword.confirm}
-          toggleShow={() => setShowPassword((p) => ({ ...p, confirm: !p.confirm }))}
-          errorKey="confirmPassword"
+          setShow={setShowPassword}
+          error={errors.confirmPassword}
+          loading={loading}
         />
- 
+
         <button
           type="submit"
           disabled={loading}
-          className={`w-full inline-flex items-center justify-center text-white py-2 rounded transition ${
-            loading ? "bg-blue-400 cursor-not-allowed" : "bg-blue-500 hover:bg-blue-600"
+          className={`w-full inline-flex items-center justify-center py-2 rounded-xl font-semibold ${
+            loading
+              ? "bg-blue-500/60 cursor-not-allowed"
+              : "bg-blue-600 hover:bg-blue-500"
           }`}
         >
           {loading ? (
@@ -177,7 +224,14 @@ export default function ChangePassword() {
                 fill="none"
                 viewBox="0 0 24 24"
               >
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                ></circle>
                 <path
                   className="opacity-75"
                   fill="currentColor"
@@ -194,5 +248,3 @@ export default function ChangePassword() {
     </div>
   );
 }
- 
- 
