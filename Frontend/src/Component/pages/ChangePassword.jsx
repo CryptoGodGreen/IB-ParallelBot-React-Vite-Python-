@@ -128,7 +128,6 @@ export default function ChangePassword() {
         { old_password: oldPassword, new_password: newPassword },
         {
           headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
-          withCredentials: true,
         }
       );
 

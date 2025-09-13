@@ -37,9 +37,13 @@ app = FastAPI(
     ],
 )
 
+origins = [
+   "*"
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -61,6 +65,6 @@ async def startup():
     # asyncio.create_task(ib_client.connect())
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    await ib_client.disconnect()
+# @app.on_event("shutdown")
+# async def shutdown():
+#     await ib_client.disconnect()
