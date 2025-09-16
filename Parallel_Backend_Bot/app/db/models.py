@@ -29,6 +29,7 @@ class UserChart(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
     symbol = Column(String, index=True, nullable=False)
     interval = Column(String, nullable=False)
     rth = Column(Boolean, default=True)
