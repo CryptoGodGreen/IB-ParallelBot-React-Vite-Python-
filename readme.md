@@ -69,6 +69,6 @@ project-root/
 ## ✅ Final Run
 
 1. Start backend with Docker (`docker compose up -d`).  
-2. Start frontend (`npm start`).  
-3. Open browser at `http://localhost:3000`.  
+2. Start frontend (`npm run dev`).  
+3. Open browser at `http://localhost:5173`.  
 4. Frontend will call backend APIs running on `http://localhost:8000`.  
