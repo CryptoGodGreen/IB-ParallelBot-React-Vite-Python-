@@ -65,11 +65,14 @@ const TradingViewWidget = () => {
       return null;
     }
 
+    const containerWidth = chartContainerRef.current.clientWidth || 800;
+    const containerHeight = chartContainerRef.current.clientHeight || 500;
+
     const chart = window.LightweightCharts.createChart(
       chartContainerRef.current,
       {
-        width: chartContainerRef.current.clientWidth,
-        height: chartContainerRef.current.clientHeight,
+        width: containerWidth,
+        height: containerHeight,
         layout: {
           background: { color: "#0f172a" },
           textColor: "#f8fafc",
@@ -128,7 +131,8 @@ const TradingViewWidget = () => {
 
       // const data = await response.json();
       const data = chartData
-
+      console.log(data);
+      
       if (!data["Time Series (Daily)"]) {
         throw new Error("Invalid API response: No time series data found");
       }
@@ -775,20 +779,6 @@ const TradingViewWidget = () => {
       </div>
 
       {/* Chart container */}
-      {isLoading && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          height: '500px',
-          backgroundColor: '#1e293b',
-          borderRadius: '8px',
-          border: '1px solid #475569'
-        }}>
-          <div style={{ fontSize: '16px', color: '#94a3b8' }}>Loading chart data...</div>
-        </div>
-      )}
-
       <div
         ref={chartContainerRef}
         style={{
@@ -796,8 +786,8 @@ const TradingViewWidget = () => {
           borderRadius: "8px",
           overflow: "hidden",
           border: "1px solid #475569",
-          display: isLoading ? 'none' : 'block',
-          backgroundColor: '#1e293b'
+          backgroundColor: '#1e293b',
+          minHeight: '500px'
         }}
       />
     </div>
