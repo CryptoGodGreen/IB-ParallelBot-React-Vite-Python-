@@ -11,6 +11,10 @@ class UserRole(str, enum.Enum):
     admin = "admin"
     user = "user"
 
+class TradingStatus(str, enum.Enum):
+    started = "started"
+    stopped = "stopped"
+
 class User(Base):
     __tablename__ = "users"
 
@@ -20,6 +24,7 @@ class User(Base):
     role = Column(Enum(UserRole), default=UserRole.user, nullable=False)
     brokerId = Column(String, nullable=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    trading_status = Column(Enum(TradingStatus), default=TradingStatus.stopped)
 
     charts = relationship("UserChart", back_populates="user", cascade="all, delete-orphan")
 

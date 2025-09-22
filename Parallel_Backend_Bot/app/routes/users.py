@@ -22,3 +22,18 @@ async def change_password(payload: ChangePassword, current_user: UserResponse = 
 @router.get("/me", response_model=UserResponse, summary="Get current user profile")
 async def read_users_me(current_user: UserResponse = Depends(get_current_user)):
     return current_user
+
+@router.post("/trades/start", summary="Start or resume trading")
+async def start_trading(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    return await user_controller.start_trading(current_user.id, db)
+
+
+@router.post("/trades/cancel", summary="Cancel all trades and stop trading")
+async def cancel_trading(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    return await user_controller.cancel_all_trades(current_user.id, db)

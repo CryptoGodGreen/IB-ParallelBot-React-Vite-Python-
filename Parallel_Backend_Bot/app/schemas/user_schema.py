@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime
+from enum import Enum
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -28,3 +29,11 @@ class ChangePassword(BaseModel):
 class ResetPassword(BaseModel):
     email: EmailStr
     new_password: str
+
+class TradingStatusEnum(str, Enum):
+    started = "started"
+    stopped = "stopped"
+
+class TradingStatusResponse(BaseModel):
+    status: TradingStatusEnum
+    message: str

@@ -1,9 +1,9 @@
 from fastapi import HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from app.db.models import User, UserRole
+from app.db.models import User, UserRole, TradingStatus
 from app.utils.security import hash_password, verify_password, create_access_token
-from app.schemas.user_schema import UserCreate, UserLogin, ChangePassword, ResetPassword
+from app.schemas.user_schema import UserLogin, ChangePassword
 from app.db.postgres import get_db
 
 async def login(user: UserLogin, db: AsyncSession):
@@ -39,3 +39,25 @@ async def seed_admin(db: AsyncSession):
         db.add(admin)
         await db.commit()
         print("✅ Admin seeded: admin@system.com / Admin@123")
+
+
+async def start_trading(user_id: int, db: AsyncSession):
+    result = await db.execute(select(User).where(User.id == user_id))
+    db_user = result.scalar()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    db_user.trading_status = TradingStatus.started
+    await db.commit()
+    return {"status": "started", "message": "Trading has been started"}
+
+
+async def cancel_all_trades(user_id: int, db: AsyncSession):
+    result = await db.execute(select(User).where(User.id == user_id))
+    db_user = result.scalar()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    db_user.trading_status = TradingStatus.stopped
+    await db.commit()
+    return {"status": "stopped", "message": "All trades cancelled and trading stopped"}

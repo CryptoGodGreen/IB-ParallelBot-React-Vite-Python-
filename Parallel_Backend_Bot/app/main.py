@@ -62,7 +62,7 @@ async def startup():
     async with AsyncSessionLocal() as db:
         await seed_admin(db)
     
-    # asyncio.create_task(ib_client.connect())
+#     asyncio.create_task(ib_client.connect())
 
 
 # @app.on_event("shutdown")
