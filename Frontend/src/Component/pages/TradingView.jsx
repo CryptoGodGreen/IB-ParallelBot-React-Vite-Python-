@@ -4,7 +4,7 @@ import chartData from '../../data/chartData.json'
 
 
 const TradingViewWidget = () => {
-  
+
   const chartContainerRef = useRef(null);
   const { symbol } = useParams();
   const [selectedColor, setSelectedColor] = useState('#f5647cff');
@@ -28,8 +28,8 @@ const TradingViewWidget = () => {
   const lineData = useRef({ entry_line: null, exit_line: null });
   const clickPoints = useRef([]);
   const colorIndex = useRef(0);
-  const updateSelection = useRef(null); 
-  const handleChartClickRef = useRef(null); 
+  const updateSelection = useRef(null);
+  const handleChartClickRef = useRef(null);
   const subscribedClickWrapperRef = useRef(null);
 
   // Color options with better visual representation
@@ -52,7 +52,7 @@ const TradingViewWidget = () => {
     showSuccess(drawingEnabled ? 'Drawing disabled' : 'Drawing enabled');
   };
 
-  
+
 
   // Initialize chart
   const initChart = useCallback(() => {
@@ -133,7 +133,7 @@ const TradingViewWidget = () => {
 
       // const data = await response.json();
       const data = chartData
-      
+
       if (!data["Time Series (Daily)"]) {
         throw new Error("Invalid API response: No time series data found");
       }
@@ -194,7 +194,7 @@ const TradingViewWidget = () => {
 
   const drawLine = useCallback((points, color = selectedColor) => {
     if (!chartInstance.current) return null;
-    
+
     const lineSeries = chartInstance.current.addLineSeries({
       color: color,
       lineWidth: 2,
@@ -228,7 +228,6 @@ const TradingViewWidget = () => {
       };
 
       const token = localStorage.getItem("token");
-      console.log(layoutData,token);
 
       if (!token) {
         setError('Authentication token not found');
@@ -267,7 +266,7 @@ const TradingViewWidget = () => {
       if (data && data.layout_data) {
         loadLayout(data);
       } else {
-      fetchLayouts();
+        fetchLayouts();
       }
     } catch (error) {
       console.error('Error saving layout data:', error);
@@ -312,14 +311,14 @@ const TradingViewWidget = () => {
     const chart = chartInstance.current;
     if (chart && Array.isArray(lines.current) && lines.current.length > 0) {
       lines.current.filter(Boolean).forEach((series) => {
-        try { chart.removeSeries(series); } catch (_) {}
+        try { chart.removeSeries(series); } catch (_) { }
       });
     }
     lines.current = [];
     clickPoints.current = [];
     lineData.current = { entry_line: null, exit_line: null };
     colorIndex.current = 0;
-    
+
     // Draw entry line
     if (layout.layout_data.entry_line) {
       const entryPoints = [
@@ -329,7 +328,7 @@ const TradingViewWidget = () => {
       drawLine(entryPoints, colorOptions[0].value);
       lineData.current.entry_line = layout.layout_data.entry_line;
     }
-    
+
     // Draw exit line
     if (layout.layout_data.exit_line) {
       const exitPoints = [
@@ -339,7 +338,7 @@ const TradingViewWidget = () => {
       drawLine(exitPoints, colorOptions[1].value);
       lineData.current.exit_line = layout.layout_data.exit_line;
     }
-    
+
     setSelectedLayoutId(layout.id);
     showSuccess('Layout loaded successfully!');
   }, [clearLines, drawLine]);
@@ -491,30 +490,30 @@ const TradingViewWidget = () => {
 
     // Create mode: draw by two clicks
     if (lineMode === 'create') {
-    clickPoints.current.push({ time: param.time, value: price });
+      clickPoints.current.push({ time: param.time, value: price });
 
-    if (clickPoints.current.length === 2) {
-      // Add new line
-      drawLine(clickPoints.current, selectedColor);
+      if (clickPoints.current.length === 2) {
+        // Add new line
+        drawLine(clickPoints.current, selectedColor);
 
-      // Store line data
-      if (colorIndex.current === 0 || lines.current.length === 1) {
-        lineData.current.entry_line = {
-          p1: { time: clickPoints.current[0].time, price: clickPoints.current[0].value },
-          p2: { time: clickPoints.current[1].time, price: clickPoints.current[1].value }
-        };
-      } else {
-        lineData.current.exit_line = {
-          p1: { time: clickPoints.current[0].time, price: clickPoints.current[0].value },
-          p2: { time: clickPoints.current[1].time, price: clickPoints.current[1].value }
-        };
-      }
+        // Store line data
+        if (colorIndex.current === 0 || lines.current.length === 1) {
+          lineData.current.entry_line = {
+            p1: { time: clickPoints.current[0].time, price: clickPoints.current[0].value },
+            p2: { time: clickPoints.current[1].time, price: clickPoints.current[1].value }
+          };
+        } else {
+          lineData.current.exit_line = {
+            p1: { time: clickPoints.current[0].time, price: clickPoints.current[0].value },
+            p2: { time: clickPoints.current[1].time, price: clickPoints.current[1].value }
+          };
+        }
 
-      clickPoints.current = [];
-      colorIndex.current++;
+        clickPoints.current = [];
+        colorIndex.current++;
 
         // Only create layout when two lines are drawn and no layout exists for this symbol
-      if (lines.current.length === 2) {
+        if (lines.current.length === 2) {
           const sym = (symbol || '').toString();
           const alreadyExists = Array.isArray(savedLayouts)
             && savedLayouts.some(l => ((l?.symbol || '').toString().toUpperCase()) === sym.toUpperCase());
@@ -522,14 +521,14 @@ const TradingViewWidget = () => {
           if (!alreadyExists) {
             console.log('[Create] Sending POST layout');
             sendLayoutData('POST');
-        } else {
+          } else {
             console.log('[Create] Skipping POST, layout exists for symbol', sym);
             showSuccess('Only one layout per symbol is allowed');
+          }
+        } else {
+          showSuccess('Line created');
         }
-      } else {
-        showSuccess('Line created');
       }
-    }
     }
   }, [drawingEnabled, lineMode, selectedLayoutId, selectedColor, clearLines, drawLine, sendLayoutData, anyLayoutExistsForSymbol]);
 
@@ -573,22 +572,22 @@ const TradingViewWidget = () => {
       resizeObserver = new ResizeObserver(() => {
         resizeHandler();
       });
-      try { resizeObserver.observe(chartContainerRef.current); } catch (_) {}
+      try { resizeObserver.observe(chartContainerRef.current); } catch (_) { }
     }
 
     // Cleanup on unmount only
     return () => {
       window.removeEventListener("resize", resizeHandler);
       if (resizeObserver) {
-        try { resizeObserver.disconnect(); } catch (_) {}
+        try { resizeObserver.disconnect(); } catch (_) { }
         resizeObserver = null;
       }
       if (subscribedClickWrapperRef.current) {
-        try { chart.unsubscribeClick(subscribedClickWrapperRef.current); } catch (_) {}
+        try { chart.unsubscribeClick(subscribedClickWrapperRef.current); } catch (_) { }
         subscribedClickWrapperRef.current = null;
       }
       if (chart) {
-        try { chart.remove(); } catch (_) {}
+        try { chart.remove(); } catch (_) { }
       }
     };
   }, [initChart, fetchStockData, fetchLayouts]);
@@ -608,7 +607,7 @@ const TradingViewWidget = () => {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '16px', backgroundColor: '#1e293b' }}>
       {/* Header with controls - Professional trading style */}
       <div style={{
-        padding: '16px', 
+        padding: '16px',
         display: 'flex',
         gap: '16px',
         alignItems: 'center',
@@ -656,41 +655,41 @@ const TradingViewWidget = () => {
           {drawingEnabled && (
             <>
               {!uiLayoutPresent && (
-          <button
+                <button
                   onClick={() => { setLineMode('create'); }}
-            style={{
-              backgroundColor: lineMode === 'create' ? '#3b82f6' : '#475569', 
-              color: 'white', 
-              padding: '8px 16px', 
-              borderRadius: '6px', 
-              border: 'none',
-              cursor: 'pointer',
-              fontWeight: '500',
-              fontSize: '14px',
-              transition: 'all 0.2s'
-            }}
-          >
-            Create Line
-          </button>
+                  style={{
+                    backgroundColor: lineMode === 'create' ? '#3b82f6' : '#475569',
+                    color: 'white',
+                    padding: '8px 16px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontWeight: '500',
+                    fontSize: '14px',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  Create Line
+                </button>
               )}
 
               {uiLayoutPresent && (
-          <button
+                <button
                   onClick={() => { setLineMode('update'); }}
-            style={{
-              backgroundColor: lineMode === 'update' ? '#3b82f6' : '#475569', 
-              color: 'white', 
-              padding: '8px 16px', 
-              borderRadius: '6px', 
-              border: 'none',
-              cursor: 'pointer',
-              fontWeight: '500',
-              fontSize: '14px',
-              transition: 'all 0.2s'
-            }}
-          >
-            Update Line
-          </button>
+                  style={{
+                    backgroundColor: lineMode === 'update' ? '#3b82f6' : '#475569',
+                    color: 'white',
+                    padding: '8px 16px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontWeight: '500',
+                    fontSize: '14px',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  Update Line
+                </button>
               )}
             </>
           )}
@@ -699,47 +698,47 @@ const TradingViewWidget = () => {
         {/* Right side controls: color (when creating) and Delete at far right */}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: '12px', alignItems: 'center' }}>
           {drawingEnabled && !uiLayoutPresent && (
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <span style={{ fontWeight: '600', color: '#e2e8f0', fontSize: '14px' }}>Line Color:</span>
-          <div style={{ display: 'flex', gap: '6px' }}>
-            {colorOptions.slice(0, 6).map((color) => (
-              <button
-                key={color.value}
-                onClick={() => setSelectedColor(color.value)}
-                style={{
-                  width: '28px',
-                  height: '28px',
-                  borderRadius: '50%',
-                  backgroundColor: color.bg,
-                  border: selectedColor === color.value ? '2px solid white' : '2px solid transparent',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s'
-                }}
-                title={color.name}
-              />
-            ))}
-          </div>
-        </div>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <span style={{ fontWeight: '600', color: '#e2e8f0', fontSize: '14px' }}>Line Color:</span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {colorOptions.slice(0, 6).map((color) => (
+                  <button
+                    key={color.value}
+                    onClick={() => setSelectedColor(color.value)}
+                    style={{
+                      width: '28px',
+                      height: '28px',
+                      borderRadius: '50%',
+                      backgroundColor: color.bg,
+                      border: selectedColor === color.value ? '2px solid white' : '2px solid transparent',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                    title={color.name}
+                  />
+                ))}
+              </div>
+            </div>
           )}
 
           {uiLayoutPresent && (
-          <button
-            onClick={() => deleteLayout(selectedLayoutId)}
-            style={{
-              backgroundColor: '#ef4444', 
-              color: 'white', 
-              padding: '8px 16px', 
-              borderRadius: '6px', 
-              border: 'none',
-              cursor: 'pointer',
-              fontWeight: '500',
-              fontSize: '14px'
-            }}
-            title={`Delete layout ${selectedLayoutId}`}
-          >
-            Delete
-          </button>
-        )}
+            <button
+              onClick={() => deleteLayout(selectedLayoutId)}
+              style={{
+                backgroundColor: '#ef4444',
+                color: 'white',
+                padding: '8px 16px',
+                borderRadius: '6px',
+                border: 'none',
+                cursor: 'pointer',
+                fontWeight: '500',
+                fontSize: '14px'
+              }}
+              title={`Delete layout ${selectedLayoutId}`}
+            >
+              Delete
+            </button>
+          )}
         </div>
       </div>
 
@@ -748,10 +747,10 @@ const TradingViewWidget = () => {
         {error && (
           <div style={{
             padding: '10px 14px',
-          backgroundColor: '#7f1d1d', 
-          border: '1px solid #ef4444', 
+            backgroundColor: '#7f1d1d',
+            border: '1px solid #ef4444',
             color: '#fecaca',
-          borderRadius: '6px',
+            borderRadius: '6px',
             minWidth: '260px',
             display: 'flex',
             justifyContent: 'space-between',
@@ -763,7 +762,7 @@ const TradingViewWidget = () => {
               onClick={() => setError(null)}
               style={{ background: 'none', border: 'none', color: '#fecaca', cursor: 'pointer', fontSize: '18px' }}
             >
-            ×
+              ×
             </button>
           </div>
         )}
@@ -771,10 +770,10 @@ const TradingViewWidget = () => {
         {successMessage && (
           <div style={{
             padding: '10px 14px',
-          backgroundColor: '#065f46', 
+            backgroundColor: '#065f46',
             border: '1px solid #10b981',
             color: '#d1fae5',
-          borderRadius: '6px',
+            borderRadius: '6px',
             minWidth: '260px',
             display: 'flex',
             justifyContent: 'space-between',
@@ -786,7 +785,7 @@ const TradingViewWidget = () => {
               onClick={() => setSuccessMessage('')}
               style={{ background: 'none', border: 'none', color: '#d1fae5', cursor: 'pointer', fontSize: '18px' }}
             >
-            ×
+              ×
             </button>
           </div>
         )}
@@ -796,13 +795,12 @@ const TradingViewWidget = () => {
       <div
         ref={chartContainerRef}
         style={{
-          flex: 1,
           borderRadius: "8px",
           overflow: "hidden",
           border: "1px solid #475569",
           backgroundColor: '#1e293b',
-          height: "500px",
-          width: '100%'
+          height: "72vh",
+          width: "100%"
         }}
       />
     </div>
