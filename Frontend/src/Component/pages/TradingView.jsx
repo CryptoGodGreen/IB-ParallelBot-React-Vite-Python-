@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import chartData from '../../data/chartData.json'
 
+
 const TradingViewWidget = () => {
   
   const chartContainerRef = useRef(null);
@@ -132,7 +133,6 @@ const TradingViewWidget = () => {
 
       // const data = await response.json();
       const data = chartData
-      console.log(data);
       
       if (!data["Time Series (Daily)"]) {
         throw new Error("Invalid API response: No time series data found");
