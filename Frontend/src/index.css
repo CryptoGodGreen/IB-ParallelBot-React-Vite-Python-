@@ -2,12 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
-/* src/index.css ya global.css me add karo */
-::-webkit-scrollbar {
-  display: none;
-}
+/* Smoother scroll + selection */
+html { scroll-behavior: smooth; }
+::selection { background: rgba(59,130,246,0.35); }
 
-html, body {
-  scrollbar-width: none;       /* Firefox */
-  -ms-overflow-style: none;    /* IE/Edge */
-}
+/* Nice cards */
+.card { @apply bg-slate-900/60 backdrop-blur-md border border-slate-800 rounded-2xl shadow-xl; }
+
+/* Glow ring utility */
+.glow-ring { box-shadow: 0 0 0 2px rgba(59,130,246,.25), 0 0 40px rgba(59,130,246,.15) inset; }
+
