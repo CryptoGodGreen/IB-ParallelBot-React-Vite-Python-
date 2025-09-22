@@ -1,6 +1,7 @@
 import logging.config
 import asyncio
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.routes import health_router, cache_router, users_router, charts_router
 from app.db.models import Base
 from app.db.postgres import engine, AsyncSessionLocal
@@ -36,6 +37,18 @@ app = FastAPI(
     ],
 )
 
+origins = [
+   "*"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(health_router)
 app.include_router(cache_router)
 app.include_router(users_router)
@@ -52,6 +65,6 @@ async def startup():
     # asyncio.create_task(ib_client.connect())
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    await ib_client.disconnect()
+# @app.on_event("shutdown")
+# async def shutdown():
+#     await ib_client.disconnect()

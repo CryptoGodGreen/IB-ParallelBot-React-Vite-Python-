@@ -2,6 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { useContext, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import axios from "axios";
+// Keep your existing path if it's correct in your repo:
 import { AuthContext } from "../../context/AuthContext";
 import { FaEye, FaEyeSlash } from "react-icons/fa";
 
