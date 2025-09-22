@@ -801,7 +801,7 @@ const TradingViewWidget = () => {
           overflow: "hidden",
           border: "1px solid #475569",
           backgroundColor: '#1e293b',
-          minHeight: '50vh',
+          height: "500px",
           width: '100%'
         }}
       />
