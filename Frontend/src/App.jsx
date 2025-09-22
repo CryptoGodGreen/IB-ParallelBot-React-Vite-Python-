@@ -17,7 +17,16 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const location = useLocation();
 
-  const toggleSidebar = () => setIsSidebarOpen((p) => !p);
+  const toggleSidebar = () => {
+    setIsSidebarOpen((prev) => {
+      const next = !prev;
+      // Trigger resize so layouts (e.g., charts) recalc during/after toggle
+      try { window.dispatchEvent(new Event('resize')); } catch (_) {}
+      setTimeout(() => { try { window.dispatchEvent(new Event('resize')); } catch (_) {} }, 16);
+      setTimeout(() => { try { window.dispatchEvent(new Event('resize')); } catch (_) {} }, 320);
+      return next;
+    });
+  };
 
   const bareRoutes = ["/login"]; 
   const isBare = bareRoutes.includes(location.pathname);
@@ -32,7 +41,7 @@ export default function App() {
           {!isBare && (
             <Sidebar isOpen={isSidebarOpen} toggleSidebar={toggleSidebar} />
           )}
-          <main className={`flex-1 ${!isBare && isSidebarOpen ? "p-6" : "p-4"}`}>
+          <main className={`flex-1 min-w-0 ${!isBare && isSidebarOpen ? "p-6" : "p-4"}`}>
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/login" element={<Login />} />

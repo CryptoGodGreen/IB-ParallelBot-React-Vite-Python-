@@ -65,8 +65,9 @@ const TradingViewWidget = () => {
       return null;
     }
 
-    const containerWidth = chartContainerRef.current.clientWidth || 800;
-    const containerHeight = chartContainerRef.current.clientHeight || 500;
+    const rect = chartContainerRef.current.getBoundingClientRect?.();
+    const containerWidth = (rect && rect.width) || chartContainerRef.current.clientWidth || 800;
+    const containerHeight = (rect && rect.height) || chartContainerRef.current.clientHeight || Math.max(320, Math.floor(window.innerHeight * 0.5));
 
     const chart = window.LightweightCharts.createChart(
       chartContainerRef.current,
@@ -557,18 +558,31 @@ const TradingViewWidget = () => {
     // Handle resize
     const resizeHandler = () => {
       if (chartContainerRef.current && chart) {
-        chart.applyOptions({
-          width: chartContainerRef.current.clientWidth,
-          height: chartContainerRef.current.clientHeight,
-        });
+        const rect = chartContainerRef.current.getBoundingClientRect?.();
+        const width = (rect && rect.width) || chartContainerRef.current.clientWidth || 800;
+        const height = (rect && rect.height) || chartContainerRef.current.clientHeight || Math.max(320, Math.floor(window.innerHeight * 0.5));
+        chart.applyOptions({ width, height });
       }
     };
 
     window.addEventListener("resize", resizeHandler);
 
+    // Observe container size changes (e.g., sidebar toggle) for more reliable responsiveness
+    let resizeObserver = null;
+    if (window.ResizeObserver && chartContainerRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        resizeHandler();
+      });
+      try { resizeObserver.observe(chartContainerRef.current); } catch (_) {}
+    }
+
     // Cleanup on unmount only
     return () => {
       window.removeEventListener("resize", resizeHandler);
+      if (resizeObserver) {
+        try { resizeObserver.disconnect(); } catch (_) {}
+        resizeObserver = null;
+      }
       if (subscribedClickWrapperRef.current) {
         try { chart.unsubscribeClick(subscribedClickWrapperRef.current); } catch (_) {}
         subscribedClickWrapperRef.current = null;
@@ -787,7 +801,8 @@ const TradingViewWidget = () => {
           overflow: "hidden",
           border: "1px solid #475569",
           backgroundColor: '#1e293b',
-          minHeight: '500px'
+          minHeight: '50vh',
+          width: '100%'
         }}
       />
     </div>

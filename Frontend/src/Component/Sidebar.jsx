@@ -1,15 +1,38 @@
 import { Link, useLocation } from "react-router-dom";
 import { SYMBOLS } from "../data/symbols";
+import { useEffect, useRef } from "react";
 
 export default function Sidebar({ isOpen, toggleSidebar }) {
   const location = useLocation();
   const items = SYMBOLS.slice(0, 10);
+  const asideRef = useRef(null);
+
+  useEffect(() => {
+    // Fire resize during toggle to help responsive components recalc
+    try { window.dispatchEvent(new Event('resize')); } catch (_) {}
+    const t = setTimeout(() => { try { window.dispatchEvent(new Event('resize')); } catch (_) {} }, 16);
+
+    // After CSS width transition completes, fire a final resize
+    const el = asideRef.current;
+    const onEnd = (e) => {
+      if (e.propertyName === 'width') {
+        try { window.dispatchEvent(new Event('resize')); } catch (_) {}
+      }
+    };
+    if (el) el.addEventListener('transitionend', onEnd);
+    return () => {
+      clearTimeout(t);
+      if (el) el.removeEventListener('transitionend', onEnd);
+    };
+  }, [isOpen]);
 
   return (
     <aside
-      className={`transition-[width] duration-300 h-[calc(100vh-4rem)] sticky top-16 ${
+      ref={asideRef}
+      className={`transition-[width] duration-300 h-[calc(100vh-4rem)] sticky top-16 shrink-0 z-30 ${
         isOpen ? "w-64" : "w-0"
       } overflow-hidden`}
+      aria-expanded={isOpen}
     >
       <div className="h-full p-4">
         <div className="card h-full p-4 bg-gradient-to-b from-slate-900/70 to-slate-900/30">
