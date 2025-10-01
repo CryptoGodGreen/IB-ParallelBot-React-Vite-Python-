@@ -7,11 +7,11 @@ import { Toaster } from "react-hot-toast";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <BrowserRouter>
+    {/* <BrowserRouter> */}
       <App />
       <Toaster position="top-center" gutter={8} toastOptions={{
         style: { background: "#0f172a", color: "#fff", border: "1px solid #1f2937" },
       }}/>
-    </BrowserRouter>
+    {/* </BrowserRouter> */}
   </React.StrictMode>
 );
