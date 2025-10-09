@@ -1,809 +1,399 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
-import chartData from '../../data/chartData.json'
-
+import ErrorBoundary from '../ErrorBoundary';
 
 const TradingViewWidget = () => {
-
-  const chartContainerRef = useRef(null);
   const { symbol } = useParams();
-  const [selectedColor, setSelectedColor] = useState('#f5647cff');
-  const [lineMode, setLineMode] = useState('create');
-  const [savedLayouts, setSavedLayouts] = useState([]);
-  const [selectedLayoutId, setSelectedLayoutId] = useState(null);
+  const containerRef = useRef(null);
+  const widgetRef = useRef(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [successMessage, setSuccessMessage] = useState('');
-  const [drawingEnabled, setDrawingEnabled] = useState(true);
+  const [retryKey, setRetryKey] = useState(0);
 
-  // API configuration
-  const API_KEY = 'K54V0ZJY31VRD59K';
-  const API_BASE_URL = 'http://localhost:8000';
-
-  // Chart references
-  const chartInstance = useRef(null);
-  const candleSeries = useRef(null);
-  const areaSeries = useRef(null);
-  const lines = useRef([]);
-  const lineData = useRef({ entry_line: null, exit_line: null });
-  const clickPoints = useRef([]);
-  const colorIndex = useRef(0);
-  const updateSelection = useRef(null);
-  const handleChartClickRef = useRef(null);
-  const subscribedClickWrapperRef = useRef(null);
-
-  // Color options with better visual representation
-  const colorOptions = [
-    { value: '#f5647cff', name: 'Red', bg: '#f5647c' },
-    { value: '#6cfaa0ff', name: 'Green', bg: '#6cfaa0' },
-
-  ];
-
-  // Show success message temporarily
-  const showSuccess = (message) => {
-    setSuccessMessage(message);
-    setTimeout(() => setSuccessMessage(''), 3000);
+  const handleRetry = () => {
+    setError(null);
+    setIsLoading(true);
+    setRetryKey(prev => prev + 1);
   };
 
-  // Toggle drawing mode
-  const toggleDrawing = () => {
-    setDrawingEnabled(!drawingEnabled);
-    setLineMode('none');
-    showSuccess(drawingEnabled ? 'Drawing disabled' : 'Drawing enabled');
-  };
-
-
-
-  // Initialize chart
-  const initChart = useCallback(() => {
-    if (!window.LightweightCharts) {
-      setError("LightweightCharts library not loaded");
-      return null;
-    }
-
-    if (!chartContainerRef.current) {
-      setError("Chart container not found");
-      return null;
-    }
-
-    const rect = chartContainerRef.current.getBoundingClientRect?.();
-    const containerWidth = (rect && rect.width) || chartContainerRef.current.clientWidth || 800;
-    const containerHeight = (rect && rect.height) || chartContainerRef.current.clientHeight || Math.max(320, Math.floor(window.innerHeight * 0.5));
-
-    const chart = window.LightweightCharts.createChart(
-      chartContainerRef.current,
-      {
-        width: containerWidth,
-        height: containerHeight,
-        layout: {
-          background: { color: "#0f172a" },
-          textColor: "#f8fafc",
-        },
-        grid: {
-          vertLines: { color: "#334155" },
-          horzLines: { color: "#334155" },
-        },
-        crosshair: {
-          mode: window.LightweightCharts.CrosshairMode.Normal,
-        },
-        timeScale: {
-          borderColor: "#475569",
-          fixLeftEdge: true,
-          fixRightEdge: true,
-        },
-      }
-    );
-
-    const candlestickSeries = chart.addCandlestickSeries({
-      upColor: "#22c55e",
-      downColor: "#ef4444",
-      borderUpColor: "#22c55e",
-      borderDownColor: "#ef4444",
-      wickUpColor: "#22c55e",
-      wickDownColor: "#ef4444",
-    });
-
-    const areaSeriesInstance = chart.addAreaSeries({
-      lineColor: "#38bdf8",
-      topColor: "rgba(56, 189, 248, 0.4)",
-      bottomColor: "rgba(15, 23, 42, 0)",
-      lineWidth: 2,
-    });
-
-    chartInstance.current = chart;
-    candleSeries.current = candlestickSeries;
-    areaSeries.current = areaSeriesInstance;
-
-    return chart;
-  }, []);
-
-  // Fetch stock data
-  const fetchStockData = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-
-      // const response = await fetch(
-      //   `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&apikey=${API_KEY}`
-      // );
-
-      // if (!response.ok) {
-      //   throw new Error(`API request failed: ${response.status}`);
-      // }
-
-      // const data = await response.json();
-      const data = chartData
-
-      if (!data["Time Series (Daily)"]) {
-        throw new Error("Invalid API response: No time series data found");
-      }
-
-      const dailyData = data["Time Series (Daily)"];
-      const candles = Object.keys(dailyData)
-        .map((date) => {
-          const d = dailyData[date];
-          return {
-            time: Math.floor(new Date(date).getTime() / 1000),
-            open: parseFloat(d["1. open"]),
-            high: parseFloat(d["2. high"]),
-            low: parseFloat(d["3. low"]),
-            close: parseFloat(d["4. close"]),
-          };
-        })
-        .reverse();
-
-      if (candleSeries.current) {
-        candleSeries.current.setData(candles);
-      }
-      if (areaSeries.current) {
-        areaSeries.current.setData(
-          candles.map((c) => ({
-            time: c.time,
-            value: c.close,
-          }))
-        );
-      }
-
-      setIsLoading(false);
-    } catch (error) {
-      console.error('Error fetching stock data:', error);
-      setError(`Failed to load stock data: ${error.message}`);
-      setIsLoading(false);
-    }
-  }, [symbol, API_KEY]);
-
-  // Chart interaction handlers
-  const clearLines = useCallback(() => {
-    const chart = chartInstance.current;
-    if (chart && Array.isArray(lines.current) && lines.current.length > 0) {
-      lines.current.filter(Boolean).forEach((series) => {
-        try {
-          chart.removeSeries(series);
-        } catch (_) {
-          // ignore already-removed or invalid refs
-        }
-      });
-    }
-    lines.current = [];
-    clickPoints.current = [];
-    lineData.current = { entry_line: null, exit_line: null };
-    colorIndex.current = 0;
-    setSelectedLayoutId(null);
-    showSuccess('All lines cleared');
-  }, []);
-
-  const drawLine = useCallback((points, color = selectedColor) => {
-    if (!chartInstance.current) return null;
-
-    const lineSeries = chartInstance.current.addLineSeries({
-      color: color,
-      lineWidth: 2,
-      lineStyle: 0, // Solid line
-      crosshairMarkerVisible: true,
-    });
-    lineSeries.setData(points);
-    lines.current.push(lineSeries);
-    return lineSeries;
-  }, [selectedColor]);
-
-  const sendLayoutData = useCallback(async (method = 'POST', id = null) => {
-
-    try {
-      const layoutData = {
-        name: `${symbol} Layout Plan`,
-        symbol: symbol,
-        interval: "1d",
-        rth: true,
-        layout_data: {
-          entry_line: lineData.current.entry_line,
-          exit_line: lineData.current.exit_line,
-          tpsl_settings: {
-            tp_type: "percentage",
-            tp_value: 2.5,
-            sl_type: "fixed",
-            sl_value: 1.0
-          },
-          other_drawings: {}
-        }
-      };
-
-      const token = localStorage.getItem("token");
-
-      if (!token) {
-        setError('Authentication token not found');
-        return;
-      }
-
-      const url = id ? `${API_BASE_URL}/charts/${id}` : `${API_BASE_URL}/charts`;
-
-      console.log('[Save] URL:', url, 'METHOD:', method, 'payload:', layoutData);
-      const response = await fetch(url, {
-        method: method,
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(layoutData),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('[Save] Error response', response.status, errorText);
-        throw new Error(`Server error: ${response.status} - ${errorText}`);
-      }
-
-      const data = await response.json();
-      console.log('[Save] Success response', data);
-      // Try multiple common shapes for id
-      const newId = data?.id || data?.data?.id || data?.chart?.id || id;
-      if (newId) setSelectedLayoutId(newId);
-      if (method === 'POST' && newId) {
-        setLineMode('update');
-      }
-      showSuccess(id ? 'Layout updated successfully!' : 'Layout saved successfully!');
-      // If full layout returned, load it immediately; else refetch symbol layouts
-      if (data && data.layout_data) {
-        loadLayout(data);
-      } else {
-        fetchLayouts();
-      }
-    } catch (error) {
-      console.error('Error saving layout data:', error);
-      setError(`Failed to save layout: ${error.message}`);
-    }
-  }, [symbol, API_BASE_URL]);
-
-  const deleteLayout = useCallback(async (id) => {
-    try {
-      const token = localStorage.getItem("token");
-      if (!token) {
-        setError('Authentication token not found');
-        return;
-      }
-
-      const response = await fetch(`${API_BASE_URL}/charts/${id}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to delete layout: ${response.status}`);
-      }
-
-      showSuccess('Layout deleted successfully!');
-      fetchLayouts();
-
-      if (selectedLayoutId === id) {
-        setSelectedLayoutId(null);
-        clearLines();
-      }
-    } catch (error) {
-      console.error('Error deleting layout:', error);
-      setError('Failed to delete layout');
-    }
-  }, [API_BASE_URL, selectedLayoutId, clearLines]);
-
-  const loadLayout = useCallback((layout) => {
-    // Clear safely without unsetting selected layout id here
-    const chart = chartInstance.current;
-    if (chart && Array.isArray(lines.current) && lines.current.length > 0) {
-      lines.current.filter(Boolean).forEach((series) => {
-        try { chart.removeSeries(series); } catch (_) { }
-      });
-    }
-    lines.current = [];
-    clickPoints.current = [];
-    lineData.current = { entry_line: null, exit_line: null };
-    colorIndex.current = 0;
-
-    // Draw entry line
-    if (layout.layout_data.entry_line) {
-      const entryPoints = [
-        { time: layout.layout_data.entry_line.p1.time, value: layout.layout_data.entry_line.p1.price },
-        { time: layout.layout_data.entry_line.p2.time, value: layout.layout_data.entry_line.p2.price }
-      ];
-      drawLine(entryPoints, colorOptions[0].value);
-      lineData.current.entry_line = layout.layout_data.entry_line;
-    }
-
-    // Draw exit line
-    if (layout.layout_data.exit_line) {
-      const exitPoints = [
-        { time: layout.layout_data.exit_line.p1.time, value: layout.layout_data.exit_line.p1.price },
-        { time: layout.layout_data.exit_line.p2.time, value: layout.layout_data.exit_line.p2.price }
-      ];
-      drawLine(exitPoints, colorOptions[1].value);
-      lineData.current.exit_line = layout.layout_data.exit_line;
-    }
-
-    setSelectedLayoutId(layout.id);
-    showSuccess('Layout loaded successfully!');
-  }, [clearLines, drawLine]);
-
-  // Fetch saved layouts (moved after loadLayout so it's initialized before use)
-  const fetchLayouts = useCallback(async () => {
-    try {
-      const token = localStorage.getItem("token");
-      if (!token) {
-        console.warn('No authentication token found');
-        return;
-      }
-
-      const response = await fetch(`${API_BASE_URL}/charts`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch layouts: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const bySymbol = Array.isArray(data) ? data.filter(l => (l?.symbol || '').toString() === (symbol || '').toString()) : [];
-      setSavedLayouts(bySymbol);
-      if (bySymbol.length > 0) {
-        const first = bySymbol[0];
-        setSelectedLayoutId(first.id);
-        loadLayout(first);
-      }
-    } catch (error) {
-      console.error('Error fetching layouts:', error);
-      setError('Failed to load saved layouts');
-    }
-  }, [API_BASE_URL, symbol, loadLayout]);
-
-  // Layout existence flags (computed before handlers to avoid TDZ in deps)
-  const hasLayoutForSymbol = Array.isArray(savedLayouts)
-    && savedLayouts.some(l => l && l.id === selectedLayoutId && (l.symbol || '').toString() === (symbol || '').toString());
-  const anyLayoutExistsForSymbol = Array.isArray(savedLayouts) && savedLayouts.length > 0;
-  // Treat layout as present immediately if we have an id, even before refetch
-  const uiLayoutPresent = !!selectedLayoutId || hasLayoutForSymbol;
-
-  // Reset local drawing state when symbol changes to avoid stale series references
   useEffect(() => {
-    lines.current = [];
-    clickPoints.current = [];
-    lineData.current = { entry_line: null, exit_line: null };
-    colorIndex.current = 0;
-    updateSelection.current = null;
-  }, [symbol]);
+    let mounted = true;
+    let widget = null;
+    let isInitializing = false;
 
-  // Handle chart click events
-  const handleChartClick = useCallback((param) => {
-    if (!drawingEnabled || !param.time || lineMode === 'none' || !candleSeries.current) return;
-
-    const price = param.seriesData.get(candleSeries.current)?.close;
-    if (!price) return;
-
-    // Update mode: select and move a single endpoint, then save immediately
-    if (lineMode === 'update' && selectedLayoutId) {
-      // Helper to find closest endpoint within tolerance
-      const findClosestEndpoint = () => {
-        const candidates = [];
-        const pushCandidate = (lineKey, pointKey, pt) => {
-          const dt = Math.abs(pt.time - param.time);
-          const dp = Math.abs(pt.price - price) / Math.max(1e-6, pt.price);
-          candidates.push({ lineKey, pointKey, dt, dp });
-        };
-
-        if (lineData.current.entry_line) {
-          pushCandidate('entry_line', 'p1', lineData.current.entry_line.p1);
-          pushCandidate('entry_line', 'p2', lineData.current.entry_line.p2);
-        }
-        if (lineData.current.exit_line) {
-          pushCandidate('exit_line', 'p1', lineData.current.exit_line.p1);
-          pushCandidate('exit_line', 'p2', lineData.current.exit_line.p2);
-        }
-
-        if (candidates.length === 0) return null;
-        // Choose by weighted distance; time window ~1 day (86400s), price tolerance ~1%
-        const ranked = candidates
-          .map(c => ({ ...c, score: c.dt / 86400 + c.dp / 0.01 }))
-          .sort((a, b) => a.score - b.score);
-        const best = ranked[0];
-        if (!best) return null;
-        // Require within loose tolerance
-        if (best.dt <= 2 * 86400 && best.dp <= 0.05) return { lineKey: best.lineKey, pointKey: best.pointKey };
-        return null;
-      };
-
-      // If no selection yet, try to select a close endpoint
-      if (!updateSelection.current) {
-        const sel = findClosestEndpoint();
-        if (sel) {
-          updateSelection.current = sel;
-          showSuccess('Endpoint selected. Click new position to update.');
-        }
-        return; // wait for next click
+    const initChart = async () => {
+      if (isInitializing) {
+        console.log('⏳ Already initializing, skipping...');
+        return;
       }
 
-      // We have a selected endpoint; update it to this click location
-      const { lineKey, pointKey } = updateSelection.current;
-      if (lineData.current[lineKey]) {
-        // Update the underlying data
-        lineData.current[lineKey][pointKey] = { time: param.time, price };
-        const seriesIndex = lineKey === 'entry_line' ? 0 : 1;
-        const series = lines.current[seriesIndex];
-        if (series) {
-          const newPoints = [
-            { time: lineData.current[lineKey].p1.time, value: lineData.current[lineKey].p1.price },
-            { time: lineData.current[lineKey].p2.time, value: lineData.current[lineKey].p2.price },
-          ];
-          series.setData(newPoints);
+      isInitializing = true;
+
+      try {
+        // Clean up any existing widget first
+        if (widgetRef.current) {
+          try {
+            console.log('🧹 Removing existing widget...');
+            widgetRef.current.remove();
+          } catch (e) {
+            console.warn('Error removing old widget:', e);
+          }
+          widgetRef.current = null;
         }
-        updateSelection.current = null;
-        sendLayoutData('PUT', selectedLayoutId);
-        showSuccess('Line updated');
-      }
-      return;
-    }
 
-    if (lineMode === 'delete') {
-      // Find and remove the clicked line
-      const clickedLineIndex = lines.current.findIndex(line => {
-        const seriesData = line.data();
-        return seriesData && seriesData.some(point =>
-          Math.abs(point.time - param.time) < 86400 &&
-          Math.abs(point.value - price) < price * 0.01
-        );
-      });
+        // Clear the container completely
+        if (containerRef.current) {
+          while (containerRef.current.firstChild) {
+            containerRef.current.removeChild(containerRef.current.firstChild);
+          }
+        }
 
-      if (clickedLineIndex !== -1 && chartInstance.current) {
-        // If any line clicked in delete mode and a layout is selected, delete the layout
-        if (selectedLayoutId) {
-          deleteLayout(selectedLayoutId);
+        // Load TradingView library
+        if (!window.TradingView) {
+          console.log('📚 Loading TradingView library...');
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = '/charting_library/charting_library.standalone.js';
+            script.async = true;
+            script.onload = resolve;
+            script.onerror = reject;
+            document.head.appendChild(script);
+          });
+        }
+
+        if (!mounted) {
+          isInitializing = false;
           return;
         }
 
-        // Fallback: remove the clicked line locally when no layout exists
-        chartInstance.current.removeSeries(lines.current[clickedLineIndex]);
-        lines.current.splice(clickedLineIndex, 1);
-        if (clickedLineIndex === 0) lineData.current.entry_line = null; else if (clickedLineIndex === 1) lineData.current.exit_line = null;
-        showSuccess('Line deleted');
-      }
-      return;
-    }
+        // Wait for cleanup to complete
+        await new Promise(resolve => setTimeout(resolve, 200));
 
-    // Create mode: draw by two clicks
-    if (lineMode === 'create') {
-      clickPoints.current.push({ time: param.time, value: price });
-
-      if (clickPoints.current.length === 2) {
-        // Add new line
-        drawLine(clickPoints.current, selectedColor);
-
-        // Store line data
-        if (colorIndex.current === 0 || lines.current.length === 1) {
-          lineData.current.entry_line = {
-            p1: { time: clickPoints.current[0].time, price: clickPoints.current[0].value },
-            p2: { time: clickPoints.current[1].time, price: clickPoints.current[1].value }
-          };
-        } else {
-          lineData.current.exit_line = {
-            p1: { time: clickPoints.current[0].time, price: clickPoints.current[0].value },
-            p2: { time: clickPoints.current[1].time, price: clickPoints.current[1].value }
-          };
+        if (!mounted) {
+          isInitializing = false;
+          return;
         }
 
-        clickPoints.current = [];
-        colorIndex.current++;
+        console.log('🚀 Creating TradingView widget with custom UDF datafeed');
+        
+        // Custom UDF-compatible datafeed
+        const datafeed = {
+          onReady: (callback) => {
+            console.log('[onReady]: Method called');
+            setTimeout(() => {
+              callback({
+                supports_search: true,
+                supports_group_request: false,
+                supports_marks: false,
+                supports_timescale_marks: false,
+                supports_time: true,
+                supported_resolutions: ['1', '5', '15', '30', '60', 'D', 'W', 'M']
+              });
+            }, 0);
+          },
 
-        // Only create layout when two lines are drawn and no layout exists for this symbol
-        if (lines.current.length === 2) {
-          const sym = (symbol || '').toString();
-          const alreadyExists = Array.isArray(savedLayouts)
-            && savedLayouts.some(l => ((l?.symbol || '').toString().toUpperCase()) === sym.toUpperCase());
-          console.log('[Create] Two lines completed for symbol', sym, 'alreadyExists?', alreadyExists, 'savedLayouts:', savedLayouts);
-          if (!alreadyExists) {
-            console.log('[Create] Sending POST layout');
-            sendLayoutData('POST');
-          } else {
-            console.log('[Create] Skipping POST, layout exists for symbol', sym);
-            showSuccess('Only one layout per symbol is allowed');
+          searchSymbols: (userInput, exchange, symbolType, onResultReadyCallback) => {
+            console.log('[searchSymbols]: Method called');
+            fetch(`http://localhost:8000/udf/search?query=${userInput}&limit=50`)
+              .then(response => response.json())
+              .then(data => onResultReadyCallback(data))
+              .catch(() => onResultReadyCallback([]));
+          },
+
+          resolveSymbol: (symbolName, onSymbolResolvedCallback, onResolveErrorCallback) => {
+            console.log('[resolveSymbol]: Method called', symbolName);
+            
+            fetch(`http://localhost:8000/udf/symbol?symbol=${symbolName}`)
+              .then(response => response.json())
+              .then(data => {
+                const symbolInfo = {
+                  name: data.name || symbolName,
+                  ticker: data.ticker || symbolName,
+                  description: data.description || `${symbolName} Stock`,
+                  type: data.type || 'stock',
+                  session: data.session || '0930-1600',
+                  timezone: data.timezone || 'America/New_York',
+                  exchange: data.exchange || 'SMART',
+                  minmov: data.minmov || 1,
+                  pricescale: data.pricescale || 100,
+                  has_intraday: Boolean(data.has_intraday),
+                  has_daily: Boolean(data.has_daily),
+                  has_weekly_and_monthly: Boolean(data.has_weekly_and_monthly),
+                  supported_resolutions: data.supported_resolutions || ['1', '5', '15', '30', '60', 'D', 'W', 'M'],
+                  volume_precision: data.volume_precision || 0,
+                  data_status: data.data_status || 'streaming',
+                  autosize: data.autosize || true
+                };
+                console.log('[resolveSymbol]: Symbol resolved', symbolInfo);
+                onSymbolResolvedCallback(symbolInfo);
+              })
+              .catch(error => {
+                console.error('[resolveSymbol]: Error', error);
+                onResolveErrorCallback('Cannot resolve symbol');
+              });
+          },
+
+          getBars: (symbolInfo, resolution, periodParams, onHistoryCallback, onErrorCallback) => {
+            const { from, to, firstDataRequest, countBack } = periodParams;
+            
+            const daysDiff = (to - from) / 86400;
+            
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.log('[getBars]: Called', {
+              symbol: symbolInfo.name,
+              resolution,
+              from: new Date(from * 1000).toISOString(),
+              to: new Date(to * 1000).toISOString(),
+              daysDiff: daysDiff.toFixed(2),
+              firstDataRequest,
+              countBack
+            });
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            
+            fetch(`http://localhost:8000/udf/history?symbol=${symbolInfo.name}&from_timestamp=${from}&to_timestamp=${to}&resolution=${resolution}`)
+              .then(response => {
+                if (!response.ok) {
+                  throw new Error(`HTTP ${response.status}`);
+                }
+                return response.json();
+              })
+              .then(data => {
+                console.log('[getBars]: Data received', {
+                  status: data.s,
+                  bars: data.t?.length || 0,
+                  firstTime: data.t?.[0] ? new Date(data.t[0] * 1000).toISOString() : null,
+                  lastTime: data.t?.[data.t.length - 1] ? new Date(data.t[data.t.length - 1] * 1000).toISOString() : null
+                });
+                
+                if (data.s === 'ok' && data.t && data.t.length > 0) {
+                  const bars = data.t.map((time, index) => ({
+                    time: time * 1000,
+                    open: data.o[index],
+                    high: data.h[index],
+                    low: data.l[index],
+                    close: data.c[index],
+                    volume: data.v[index]
+                  }));
+                  
+                  // Sort bars by time (ascending)
+                  bars.sort((a, b) => a.time - b.time);
+                  
+                  console.log('[getBars]: Returning', bars.length, 'bars');
+                  console.log('[getBars]: First bar:', new Date(bars[0].time).toISOString());
+                  console.log('[getBars]: Last bar:', new Date(bars[bars.length - 1].time).toISOString());
+                  console.log('[getBars]: Requested from:', new Date(from * 1000).toISOString());
+                  console.log('[getBars]: Requested to:', new Date(to * 1000).toISOString());
+                  
+                  // Always tell TradingView there might be more data (noData: false)
+                  // This allows continuous loading when panning
+                  onHistoryCallback(bars, { noData: false });
+                } else if (data.s === 'no_data') {
+                  console.log('[getBars]: No data available');
+                  onHistoryCallback([], { noData: true });
+                } else if (data.s === 'error') {
+                  console.error('[getBars]: Server error:', data.errmsg);
+                  onErrorCallback(data.errmsg || 'Unknown error');
+                } else {
+                  onErrorCallback('Invalid data format');
+                }
+              })
+              .catch(error => {
+                console.error('[getBars]: Error', error);
+                onErrorCallback(error.message);
+              });
+          },
+
+          subscribeBars: (symbolInfo, resolution, onRealtimeCallback, subscriberUID, onResetCacheNeededCallback) => {
+            console.log('[subscribeBars]: Method called', subscriberUID);
+          },
+
+          unsubscribeBars: (subscriberUID) => {
+            console.log('[unsubscribeBars]: Method called', subscriberUID);
+          },
+
+          calculateHistoryDepth: (resolution, resolutionBack, intervalBack) => {
+            console.log('[calculateHistoryDepth]: Called', { resolution, resolutionBack, intervalBack });
+            
+            // Tell TradingView how much historical data to initially request
+            // This controls the initial visible range
+            if (resolution === '1') {
+              // For 1-minute: request only 1 day initially
+              return { resolutionBack: 'D', intervalBack: 1 };
+            } else if (['3', '5', '15', '30'].includes(resolution)) {
+              // For intraday: request 3 days
+              return { resolutionBack: 'D', intervalBack: 3 };
+            } else if (['60', '120', '240'].includes(resolution)) {
+              // For hourly: request 1 week
+              return { resolutionBack: 'D', intervalBack: 7 };
+            } else {
+              // For daily+: request 3 months
+              return { resolutionBack: 'M', intervalBack: 3 };
+            }
           }
-        } else {
-          showSuccess('Line created');
+        };
+
+        const widgetOptions = {
+          symbol: symbol || 'AAPL',
+          datafeed: datafeed,
+          interval: '1',
+          container: containerRef.current,
+          library_path: '/charting_library/',
+          locale: 'en',
+          disabled_features: ['use_localstorage_for_settings'],
+          enabled_features: ['study_templates'],
+          fullscreen: false,
+          autosize: true,
+          theme: 'Dark',
+          debug: true,
+          // Set initial visible range to 1 day for 1-minute chart
+          time_frames: [
+            { text: "1d", resolution: "1", description: "1 Day" },
+            { text: "5d", resolution: "1", description: "5 Days" },
+            { text: "1m", resolution: "5", description: "1 Month" },
+            { text: "3m", resolution: "60", description: "3 Months" },
+            { text: "6m", resolution: "D", description: "6 Months" },
+            { text: "1y", resolution: "D", description: "1 Year" },
+          ]
+        };
+
+        widget = new window.TradingView.widget(widgetOptions);
+        widgetRef.current = widget;
+        console.log('✅ TradingView widget created');
+
+        widget.onChartReady(() => {
+          if (mounted) {
+            console.log('🎉 Chart is ready!');
+            setIsLoading(false);
+            setError(null);
+          }
+        });
+
+      } catch (err) {
+        console.error('❌ Error initializing chart:', err);
+        if (mounted) {
+          setError(err.message || 'Failed to initialize chart');
+          setIsLoading(false);
         }
-      }
-    }
-  }, [drawingEnabled, lineMode, selectedLayoutId, selectedColor, clearLines, drawLine, sendLayoutData, anyLayoutExistsForSymbol]);
-
-  // Keep ref pointing to the latest click handler implementation
-  useEffect(() => {
-    handleChartClickRef.current = handleChartClick;
-  }, [handleChartClick]);
-
-  // Setup chart and data; subscribe click once via stable wrapper
-  useEffect(() => {
-    const chart = initChart();
-    if (!chart) return;
-
-    fetchStockData();
-    fetchLayouts();
-
-    // Subscribe to click events via a stable wrapper
-    const clickWrapper = (param) => {
-      if (handleChartClickRef.current) {
-        handleChartClickRef.current(param);
-      }
-    };
-    subscribedClickWrapperRef.current = clickWrapper;
-    chart.subscribeClick(clickWrapper);
-
-    // Handle resize
-    const resizeHandler = () => {
-      if (chartContainerRef.current && chart) {
-        const rect = chartContainerRef.current.getBoundingClientRect?.();
-        const width = (rect && rect.width) || chartContainerRef.current.clientWidth || 800;
-        const height = (rect && rect.height) || chartContainerRef.current.clientHeight || Math.max(320, Math.floor(window.innerHeight * 0.5));
-        chart.applyOptions({ width, height });
+      } finally {
+        isInitializing = false;
       }
     };
 
-    window.addEventListener("resize", resizeHandler);
+    // Reset error state when starting
+    setError(null);
+    setIsLoading(true);
+    
+    initChart();
 
-    // Observe container size changes (e.g., sidebar toggle) for more reliable responsiveness
-    let resizeObserver = null;
-    if (window.ResizeObserver && chartContainerRef.current) {
-      resizeObserver = new ResizeObserver(() => {
-        resizeHandler();
-      });
-      try { resizeObserver.observe(chartContainerRef.current); } catch (_) { }
-    }
-
-    // Cleanup on unmount only
     return () => {
-      window.removeEventListener("resize", resizeHandler);
-      if (resizeObserver) {
-        try { resizeObserver.disconnect(); } catch (_) { }
-        resizeObserver = null;
-      }
-      if (subscribedClickWrapperRef.current) {
-        try { chart.unsubscribeClick(subscribedClickWrapperRef.current); } catch (_) { }
-        subscribedClickWrapperRef.current = null;
-      }
-      if (chart) {
-        try { chart.remove(); } catch (_) { }
-      }
+      console.log('🔄 Component unmounting or re-rendering...');
+      mounted = false;
+      
+      // Use setTimeout to defer cleanup and avoid React conflicts
+      setTimeout(() => {
+        if (widget) {
+          try {
+            console.log('🧹 Cleaning up widget (deferred)');
+            widget.remove();
+          } catch (e) {
+            console.warn('Cleanup error:', e);
+          }
+        }
+        if (widgetRef.current && widgetRef.current !== widget) {
+          try {
+            widgetRef.current.remove();
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+        }
+        widgetRef.current = null;
+      }, 0);
     };
-  }, [initChart, fetchStockData, fetchLayouts]);
-
-  // Keep delete button visibility accurate for current symbol
-
-  // If symbol changes or no matching layout exists, hide delete by clearing selectedLayoutId
-  useEffect(() => {
-    if (!hasLayoutForSymbol) {
-      // do not clear during active draw; just hide delete by nulling id
-      setSelectedLayoutId(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, savedLayouts]);
+  }, [symbol, retryKey]);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '16px', backgroundColor: '#1e293b' }}>
-      {/* Header with controls - Professional trading style */}
-      <div style={{
-        padding: '16px',
-        display: 'flex',
-        gap: '16px',
-        alignItems: 'center',
-        flexWrap: 'wrap',
-        backgroundColor: '#334155',
-        borderRadius: '8px',
-        marginBottom: '16px',
-        border: '1px solid #475569'
-      }}>
-        {/* Drawing Mode / Toggle */}
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-          <span style={{ fontWeight: '600', color: '#e2e8f0', fontSize: '14px' }}>Drawing:</span>
-          {/* Toggle Switch */}
+    <ErrorBoundary>
+      <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 100px)', backgroundColor: '#1e293b' }}>
+        <div
+          style={{
+            flex: 1,
+            backgroundColor: '#0f172a',
+            border: "1px solid #334155",
+            position: 'relative',
+            minHeight: '400px',
+            overflow: 'hidden'
+          }}
+        >
           <div
-            onClick={toggleDrawing}
-            role="switch"
-            aria-checked={drawingEnabled}
+            ref={containerRef}
             style={{
-              position: 'relative',
-              width: '54px',
-              height: '28px',
-              backgroundColor: drawingEnabled ? '#10b981' : '#475569',
-              borderRadius: '9999px',
-              cursor: 'pointer',
-              transition: 'background-color 0.2s ease',
-              border: '1px solid #334155'
+              width: '100%',
+              height: '100%',
+              position: 'absolute',
+              top: 0,
+              left: 0
             }}
-            title={drawingEnabled ? 'Drawing On' : 'Drawing Off'}
-          >
-            <div
-              style={{
-                position: 'absolute',
-                top: '3px',
-                left: drawingEnabled ? '28px' : '3px',
-                width: '22px',
-                height: '22px',
-                backgroundColor: '#fff',
-                borderRadius: '50%',
-                transition: 'left 0.2s ease'
-              }}
-            />
-          </div>
-
-          {/* Create/Update appear only when drawing is enabled */}
-          {drawingEnabled && (
-            <>
-              {!uiLayoutPresent && (
-                <button
-                  onClick={() => { setLineMode('create'); }}
-                  style={{
-                    backgroundColor: lineMode === 'create' ? '#3b82f6' : '#475569',
-                    color: 'white',
-                    padding: '8px 16px',
-                    borderRadius: '6px',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontWeight: '500',
-                    fontSize: '14px',
-                    transition: 'all 0.2s'
-                  }}
-                >
-                  Create Line
-                </button>
-              )}
-
-              {uiLayoutPresent && (
-                <button
-                  onClick={() => { setLineMode('update'); }}
-                  style={{
-                    backgroundColor: lineMode === 'update' ? '#3b82f6' : '#475569',
-                    color: 'white',
-                    padding: '8px 16px',
-                    borderRadius: '6px',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontWeight: '500',
-                    fontSize: '14px',
-                    transition: 'all 0.2s'
-                  }}
-                >
-                  Update Line
-                </button>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* Right side controls: color (when creating) and Delete at far right */}
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: '12px', alignItems: 'center' }}>
-          {drawingEnabled && !uiLayoutPresent && (
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <span style={{ fontWeight: '600', color: '#e2e8f0', fontSize: '14px' }}>Line Color:</span>
-              <div style={{ display: 'flex', gap: '6px' }}>
-                {colorOptions.slice(0, 6).map((color) => (
-                  <button
-                    key={color.value}
-                    onClick={() => setSelectedColor(color.value)}
-                    style={{
-                      width: '28px',
-                      height: '28px',
-                      borderRadius: '50%',
-                      backgroundColor: color.bg,
-                      border: selectedColor === color.value ? '2px solid white' : '2px solid transparent',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}
-                    title={color.name}
-                  />
-                ))}
-              </div>
+            suppressHydrationWarning
+          />
+          {isLoading && (
+            <div style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              backgroundColor: 'rgba(15, 23, 42, 0.8)',
+              color: '#e2e8f0',
+              fontSize: '18px',
+              zIndex: 10,
+              pointerEvents: 'none'
+            }}>
+              Loading TradingView Chart...
             </div>
           )}
-
-          {uiLayoutPresent && (
-            <button
-              onClick={() => deleteLayout(selectedLayoutId)}
-              style={{
-                backgroundColor: '#ef4444',
-                color: 'white',
-                padding: '8px 16px',
-                borderRadius: '6px',
-                border: 'none',
-                cursor: 'pointer',
-                fontWeight: '500',
-                fontSize: '14px'
-              }}
-              title={`Delete layout ${selectedLayoutId}`}
-            >
-              Delete
-            </button>
-          )}
-        </div>
       </div>
 
-      {/* Status messages (top-right overlays) */}
-      <div style={{ position: 'fixed', top: '16px', right: '16px', display: 'flex', flexDirection: 'column', gap: '10px', zIndex: 1000 }}>
         {error && (
           <div style={{
-            padding: '10px 14px',
-            backgroundColor: '#7f1d1d',
-            border: '1px solid #ef4444',
-            color: '#fecaca',
-            borderRadius: '6px',
-            minWidth: '260px',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            boxShadow: '0 8px 16px rgba(0,0,0,0.3)'
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            padding: '24px',
+            backgroundColor: '#1e293b',
+            border: '2px solid #ef4444',
+            color: '#e2e8f0',
+            borderRadius: '12px',
+            minWidth: '320px',
+            textAlign: 'center',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.5)',
+            zIndex: 1000
           }}>
-            <span style={{ marginRight: '12px' }}>{error}</span>
+            <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
+            <h3 style={{ margin: '0 0 8px 0', color: '#ef4444' }}>Chart Error</h3>
+            <p style={{ margin: '0 0 20px 0', color: '#94a3b8' }}>{error}</p>
             <button
-              onClick={() => setError(null)}
-              style={{ background: 'none', border: 'none', color: '#fecaca', cursor: 'pointer', fontSize: '18px' }}
+              onClick={handleRetry}
+              style={{
+                padding: '10px 24px',
+                backgroundColor: '#3b82f6',
+                border: 'none',
+                color: 'white',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '16px',
+                fontWeight: '500'
+              }}
             >
-              ×
-            </button>
-          </div>
-        )}
-
-        {successMessage && (
-          <div style={{
-            padding: '10px 14px',
-            backgroundColor: '#065f46',
-            border: '1px solid #10b981',
-            color: '#d1fae5',
-            borderRadius: '6px',
-            minWidth: '260px',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            boxShadow: '0 8px 16px rgba(0,0,0,0.3)'
-          }}>
-            <span style={{ marginRight: '12px' }}>{successMessage}</span>
-            <button
-              onClick={() => setSuccessMessage('')}
-              style={{ background: 'none', border: 'none', color: '#d1fae5', cursor: 'pointer', fontSize: '18px' }}
-            >
-              ×
+              Try Again
             </button>
           </div>
         )}
       </div>
-
-      {/* Chart container */}
-      <div
-        ref={chartContainerRef}
-        style={{
-          borderRadius: "8px",
-          overflow: "hidden",
-          border: "1px solid #475569",
-          backgroundColor: '#1e293b',
-          height: "72vh",
-          width: "100%"
-        }}
-      />
-    </div>
+    </ErrorBoundary>
   );
 };
 

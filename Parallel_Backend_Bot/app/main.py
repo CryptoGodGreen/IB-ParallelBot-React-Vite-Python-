@@ -3,7 +3,9 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes import health_router, cache_router, users_router, charts_router
+from app.api.udf import router as udf_router
 from app.db.models import Base
+from app.models.market_data import Base as MarketDataBase
 from app.db.postgres import engine, AsyncSessionLocal
 from app.controllers.user_controller import seed_admin
 from app.utils.ib_client import ib_client
@@ -53,18 +55,29 @@ app.include_router(health_router)
 app.include_router(cache_router)
 app.include_router(users_router)
 app.include_router(charts_router)
+app.include_router(udf_router)
 
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(MarketDataBase.metadata.create_all)
 
     async with AsyncSessionLocal() as db:
         await seed_admin(db)
     
-#     asyncio.create_task(ib_client.connect())
+    # Try to connect to IBKR (don't fail if unavailable)
+    try:
+        await ib_client.connect()
+        logging.getLogger(__name__).info("✅ IBKR connection established on startup")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"⚠️ IBKR connection failed on startup: {e}")
+        logging.getLogger(__name__).warning("📌 Make sure TWS/IB Gateway is running with API enabled")
 
 
-# @app.on_event("shutdown")
-# async def shutdown():
-#     await ib_client.disconnect()
+@app.on_event("shutdown")
+async def shutdown():
+    try:
+        await ib_client.disconnect()
+    except Exception:
+        pass

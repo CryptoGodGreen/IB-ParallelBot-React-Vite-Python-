@@ -64,8 +64,8 @@ services:
       - LOG_FORMAT=${LOG_FORMAT}
     ports:
       - "8000:8000"
-    volumes:
-      - ./app:/app/app
+    # volumes:
+    #   - ./app:/app/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     extra_hosts:
       - "host.docker.internal:host-gateway"
