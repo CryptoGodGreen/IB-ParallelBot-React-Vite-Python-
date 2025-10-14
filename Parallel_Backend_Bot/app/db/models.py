@@ -1,6 +1,6 @@
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import (
-    Column, Integer, String, DateTime, Enum, Numeric, Boolean, ForeignKey, func, JSON
+    Column, Integer, String, DateTime, Enum, Numeric, Boolean, ForeignKey, func, JSON, Index
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -46,3 +46,8 @@ class UserChart(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     user = relationship("User", back_populates="charts")
+    
+    # Add composite index for faster queries
+    __table_args__ = (
+        Index('idx_user_charts_user_id_id', 'user_id', 'id'),
+    )

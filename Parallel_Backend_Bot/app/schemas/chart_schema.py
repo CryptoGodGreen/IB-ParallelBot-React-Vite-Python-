@@ -21,11 +21,40 @@ class TPSLSettings(BaseModel):
     sl_type: str  # e.g., 'absolute', 'percent'
     sl_value: float
 
+class StopOutRule(BaseModel):
+    """Defines stop-out rules for different timeframes."""
+    enabled: bool = False
+    threshold: float = 0.02  # 2% default threshold
+    hard_stop: bool = False  # Whether this is a hard stop that halts all trading
+
+class BotConfiguration(BaseModel):
+    """Configuration for the limit-order ladder trading bot."""
+    # Position management
+    max_position: float = 10000
+    position_size: float = 1000
+    max_distance_from_entry: float = 0.05  # 5% max distance from entry line
+    
+    # Stop-out rules by timeframe
+    five_minute_stop_loss: StopOutRule = StopOutRule()
+    fifteen_minute_stop_loss: StopOutRule = StopOutRule()
+    one_hour_stop_loss: StopOutRule = StopOutRule()
+    
+    # Order management
+    update_interval: int = 1000  # milliseconds
+    min_order_size: float = 10
+    max_order_size: float = 1000
+    
+    # Bot state
+    is_active: bool = False
+    emergency_brake: bool = False
+
 class LayoutData(BaseModel):
     """A structured model for the chart's layout and drawing data."""
     entry_line: Optional[Line] = None
     exit_line: Optional[Line] = None
     tpsl_settings: Optional[TPSLSettings] = None
+    # Trading bot configuration
+    bot_configuration: Optional[BotConfiguration] = None
     # This can be extended with other drawings or metadata in the future
     other_drawings: Optional[Dict[str, Any]] = None
 

@@ -18,7 +18,8 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
-      - appnet
+      appnet:
+        ipv4_address: 172.25.0.10
 
   redis:
     image: redis:7.2-alpine
@@ -32,7 +33,8 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - appnet
+      appnet:
+        ipv4_address: 172.25.0.11
 
   fastapi-app:
     build:
@@ -70,10 +72,19 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - appnet
+      appnet:
+        ipv4_address: 172.25.0.20
 
 volumes:
   pgdata:
 
 networks:
   appnet:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-trading
+      com.docker.network.driver.mtu: 1500
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.0.0/16

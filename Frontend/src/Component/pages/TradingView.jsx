@@ -2,14 +2,20 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import ErrorBoundary from '../ErrorBoundary';
 import chartService from '../../services/chartService';
+import tradingService from '../../services/trading/TradingService.js';
 
 const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onSaveRequested }) => {
   const { symbol } = useParams();
   const containerRef = useRef(null);
   const widgetRef = useRef(null);
+  const loadingConfigIdRef = useRef(null); // Track which config is currently being loaded
+  const savingConfigIdRef = useRef(null); // Track which config is currently being saved
   const [isLoading, setIsLoading] = useState(true);
+  const [tradingStatus, setTradingStatus] = useState(null);
   const [error, setError] = useState(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [isDrawingLines, setIsDrawingLines] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('Loading chart...');
 
   const handleRetry = () => {
     setError(null);
@@ -24,6 +30,16 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
         console.warn('⚠️ Widget not ready, cannot save drawings');
         return;
       }
+      
+      // Check if this is still the selected config (prevent saving wrong config)
+      if (selectedConfig?.id !== configId) {
+        console.warn(`⚠️ Config ${configId} is no longer selected, skipping save`);
+        return;
+      }
+      
+      // Mark this config as currently being saved
+      savingConfigIdRef.current = configId;
+      console.log(`🔒 Locked saving for config: ${configId}`);
       
       console.log('💾 Starting save process for config:', configId);
       
@@ -67,9 +83,12 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                 // Count LineToolTrendLine objects
                 const trendLines = sources.filter(s => s.type === 'LineToolTrendLine');
                 console.log('💾 Number of trend lines found:', trendLines.length);
+                console.log('💾 All source types:', sources.map(s => ({ type: s.type, name: s.name })));
                 
                 if (trendLines.length > 0) {
                   console.log('💾 Trend line details:', trendLines);
+                } else {
+                  console.log('⚠️ No trend lines found in sources. Available sources:', sources);
                 }
               }
             }
@@ -240,10 +259,20 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
             };
             
             // Try to identify specific types of drawings and map to backend schema
+            console.log('💾 Processing', allDrawings.length, 'drawings for schema mapping...');
             allDrawings.forEach((drawing, index) => {
+              console.log(`💾 Drawing ${index}:`, { type: drawing.type, shape: drawing.shape, name: drawing.name, points: drawing.points?.length });
+              
               if (drawing && typeof drawing === 'object') {
-                // Check if it's a trend line (common entry/exit line)
-                if (drawing.type === 'trend_line' || drawing.shape === 'trend_line') {
+                // Check if it's a trend line (common entry/exit line) - be more flexible with detection
+                const isTrendLine = drawing.type === 'trend_line' || 
+                                  drawing.shape === 'trend_line' || 
+                                  drawing.name === 'trend_line' ||
+                                  drawing.type === 'LineToolTrendLine' ||
+                                  drawing.name === 'LineToolTrendLine' ||
+                                  (drawing.points && drawing.points.length >= 2); // Any drawing with 2+ points
+                
+                if (isTrendLine) {
                   // Convert TradingView drawing to backend Line schema
                   if (drawing.points && drawing.points.length >= 2) {
                     const lineData = {
@@ -294,6 +323,82 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
               other_drawings: Object.keys(layoutData.other_drawings).length
             }
           });
+          
+          // If no entry line was found, try to extract from TradingView layout data
+          if (!layoutData.entry_line && layoutData.other_drawings?.tradingview_layout) {
+            console.log('⚠️ No entry line found in manual capture, checking TradingView layout...');
+            const tvLayout = layoutData.other_drawings.tradingview_layout;
+            
+            // Extract trend lines from TradingView layout structure
+            if (tvLayout.charts && tvLayout.charts.length > 0) {
+              const panes = tvLayout.charts[0].panes || [];
+              if (panes.length > 0) {
+                const sources = panes[0].sources || [];
+                const trendLines = sources.filter(s => s.type === 'LineToolTrendLine');
+                
+                console.log(`💾 Found ${trendLines.length} trend lines in TradingView layout`);
+                
+                if (trendLines.length > 0) {
+                  // Extract points from the first trend line for entry
+                  const firstLine = trendLines[0];
+                  if (firstLine.state && firstLine.state.points && firstLine.state.points.length >= 2) {
+                    const points = firstLine.state.points;
+                    layoutData.entry_line = {
+                      p1: { 
+                        time: Math.floor(points[0].time || points[0].timestamp || Date.now() / 1000), 
+                        price: parseFloat(points[0].price || points[0].value || 0) 
+                      },
+                      p2: { 
+                        time: Math.floor(points[1].time || points[1].timestamp || Date.now() / 1000), 
+                        price: parseFloat(points[1].price || points[1].value || 0) 
+                      }
+                    };
+                    console.log('💾 Created entry line from TradingView layout:', layoutData.entry_line);
+                  }
+                  
+                  // Extract additional lines as exit lines
+                  for (let i = 1; i < trendLines.length && i < 5; i++) {
+                    const line = trendLines[i];
+                    if (line.state && line.state.points && line.state.points.length >= 2) {
+                      const points = line.state.points;
+                      if (!layoutData.exit_line) {
+                        layoutData.exit_line = {
+                          p1: { 
+                            time: Math.floor(points[0].time || points[0].timestamp || Date.now() / 1000), 
+                            price: parseFloat(points[0].price || points[0].value || 0) 
+                          },
+                          p2: { 
+                            time: Math.floor(points[1].time || points[1].timestamp || Date.now() / 1000), 
+                            price: parseFloat(points[1].price || points[1].value || 0) 
+                          }
+                        };
+                        console.log('💾 Created exit line from TradingView layout:', layoutData.exit_line);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          
+          // Fallback: If still no entry line, use first available drawing
+          if (!layoutData.entry_line && allDrawings.length > 0) {
+            console.log('⚠️ No entry line found, using first available line as entry line');
+            const firstDrawing = allDrawings[0];
+            if (firstDrawing.points && firstDrawing.points.length >= 2) {
+              layoutData.entry_line = {
+                p1: { 
+                  time: Math.floor(firstDrawing.points[0].time || firstDrawing.points[0].x || Date.now() / 1000), 
+                  price: parseFloat(firstDrawing.points[0].price || firstDrawing.points[0].y || 0) 
+                },
+                p2: { 
+                  time: Math.floor(firstDrawing.points[1].time || firstDrawing.points[1].x || Date.now() / 1000), 
+                  price: parseFloat(firstDrawing.points[1].price || firstDrawing.points[1].y || 0) 
+                }
+              };
+              console.log('💾 Created entry line from first drawing:', layoutData.entry_line);
+            }
+          }
         }
         // Method 5: Try to access TradingView's internal state
         else {
@@ -328,30 +433,68 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
 
       console.log('💾 Final layout data to save (backend schema):', layoutData);
       
-      // Call parent component's save function
-      if (onSaveDrawings && layoutData) {
-        await onSaveDrawings(configId, { ...configData, layout_data: layoutData });
-        console.log('✅ Layout data saved successfully');
+      // Final check before saving to backend (prevent race condition)
+      if (savingConfigIdRef.current !== configId) {
+        console.warn(`⚠️ Config ${configId} is no longer being saved (current: ${savingConfigIdRef.current}), aborting save`);
+        return;
       }
+      
+      // Call parent component's save function and get the updated config back
+      if (onSaveDrawings && layoutData) {
+        const updatedConfig = await onSaveDrawings(configId, { ...configData, layout_data: layoutData });
+        console.log('✅ Layout data saved successfully');
+        return updatedConfig; // Return the fresh config from PUT response
+      }
+      
+      return null;
     } catch (error) {
       console.error('❌ Error saving drawings:', error);
     }
   };
 
   // Load drawings from backend using TradingView's proper API
-  const loadDrawingsForConfig = async (configId) => {
+  // configData parameter allows passing fresh data directly (e.g., from PUT response)
+  const loadDrawingsForConfig = async (configId, configData = null) => {
     try {
       if (!widgetRef.current) {
         console.warn('⚠️ Widget not ready, cannot load drawings');
         return;
       }
       
-      console.log('📥 Loading layout data for config:', configId);
+      // Check if this is still the selected config (prevent race conditions)
+      if (selectedConfig?.id !== configId) {
+        console.warn(`⚠️ Config ${configId} is no longer selected, skipping load`);
+        return;
+      }
       
-      // Call parent component's load function
-      if (onLoadDrawings) {
-        const savedData = await onLoadDrawings(configId);
-        if (savedData && savedData.layout_data) {
+      // Mark this config as currently loading
+      loadingConfigIdRef.current = configId;
+      console.log(`🔒 Locked loading for config: ${configId}`);
+      
+      setIsDrawingLines(true);
+      setLoadingMessage('Loading configuration drawings...');
+      
+      console.log('📥 Loading layout data for config:', configId);
+      console.log('📥 Widget ref available:', !!widgetRef.current);
+      console.log('📥 Chart available:', !!widgetRef.current.chart);
+      
+      // Use provided configData first (e.g., from PUT response), then selectedConfig, then fetch
+      let savedData = configData || selectedConfig;
+      
+      // Only fetch from backend if we don't have layout_data or it's incomplete
+      const needsBackendFetch = !savedData?.layout_data || 
+                               (savedData.layout_data && 
+                                typeof savedData.layout_data === 'object' && 
+                                Object.keys(savedData.layout_data).length === 0);
+      
+      if (needsBackendFetch && onLoadDrawings) {
+        console.log('📥 Fetching from backend...');
+        savedData = await onLoadDrawings(configId);
+      } else {
+        console.log('📥 Using existing data (skipping backend fetch)');
+      }
+      
+      if (savedData && savedData.layout_data) {
           console.log('📥 Found saved data from backend:', savedData);
           console.log('📥 Layout data structure:', savedData.layout_data);
           
@@ -366,9 +509,6 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
             console.log('📊 Exit line:', savedData.layout_data.exit_line);
             console.log('📊 TP/SL settings:', savedData.layout_data.tpsl_settings);
             console.log('📊 Other drawings:', savedData.layout_data.other_drawings);
-            
-            // Wait for widget to be ready
-            await new Promise(resolve => setTimeout(resolve, 500));
             
             // Clear existing drawings first
             try {
@@ -400,6 +540,12 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                 
                 // Restore each drawing
                 for (const drawing of drawings) {
+                  // Check if this config is still the one being loaded (prevent race conditions)
+                  if (loadingConfigIdRef.current !== configId) {
+                    console.warn(`⚠️ Config ${configId} is no longer being loaded (current: ${loadingConfigIdRef.current}), aborting`);
+                    return;
+                  }
+                  
                   try {
                     console.log('📥 Restoring drawing:', drawing);
                     console.log('📥 Drawing points:', drawing.points);
@@ -661,9 +807,6 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           if (savedData.layout_data.charts || savedData.layout_data.drawings || savedData.layout_data.timestamp) {
             console.log('📥 TradingView layout format detected');
             
-            // Wait for widget to be ready
-            await new Promise(resolve => setTimeout(resolve, 500));
-            
             try {
               // Try to load the layout back into TradingView
               if (widgetRef.current && typeof widgetRef.current.load === 'function') {
@@ -693,13 +836,30 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
         } else {
           console.log('📥 No layout data found for config:', configId);
         }
-      }
     } catch (error) {
       console.error('❌ Error loading drawings:', error);
+    } finally {
+      setIsDrawingLines(false);
+      setLoadingMessage('Loading chart...');
     }
   };
 
   useEffect(() => {
+    // Initialize trading service
+    tradingService.initialize({
+      onBotStatusChange: (configId, status, data) => {
+        console.log(`🤖 Bot status change for config ${configId}:`, status, data);
+        setTradingStatus({ configId, status, data });
+      },
+      onOrderUpdate: (configId, type, order) => {
+        console.log(`📈 Order ${type} for config ${configId}:`, order);
+      },
+      onError: (configId, error) => {
+        console.error(`❌ Trading error for config ${configId}:`, error);
+        setError(`Trading Error: ${error}`);
+      }
+    });
+
     let mounted = true;
     let widget = null;
     let isInitializing = false;
@@ -1061,6 +1221,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           if (mounted) {
             console.log('🎉 Chart is ready!');
             setIsLoading(false);
+            setLoadingMessage('Chart ready');
             setError(null);
             
             // Debug: Log available methods
@@ -1130,6 +1291,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
     // Reset error state when starting
     setError(null);
     setIsLoading(true);
+    setLoadingMessage('Initializing chart...');
     
     initChart();
 
@@ -1168,39 +1330,99 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
     };
   }, [symbol, retryKey]);
 
-  // Load drawings when selected config changes
+  // Load drawings and initialize trading bot when selected config changes
   useEffect(() => {
     if (selectedConfig && selectedConfig.id && widgetRef.current && !isLoading) {
-      console.log('🔄 Config changed, loading drawings for:', selectedConfig.id);
+      console.log('🔄 Config changed, loading drawings and initializing trading bot for:', selectedConfig.id);
       
-      // Load drawings with a delay to ensure chart is ready
-      const timeoutId = setTimeout(() => {
-        loadDrawingsForConfig(selectedConfig.id);
-      }, 1000);
+      // Cancel any ongoing save/load operations for previous configs
+      if (savingConfigIdRef.current && savingConfigIdRef.current !== selectedConfig.id) {
+        console.log(`🚫 Cancelling save for config ${savingConfigIdRef.current}`);
+        savingConfigIdRef.current = null;
+      }
+      if (loadingConfigIdRef.current && loadingConfigIdRef.current !== selectedConfig.id) {
+        console.log(`🚫 Cancelling load for config ${loadingConfigIdRef.current}`);
+        loadingConfigIdRef.current = null;
+      }
       
-      return () => clearTimeout(timeoutId);
+      // Load drawings immediately - the widget is already ready
+      const loadImmediately = async () => {
+        console.log('⚡ Loading configuration immediately...');
+        setLoadingMessage('Switching configuration...');
+        await loadDrawingsForConfig(selectedConfig.id);
+        
+        // Initialize trading bot with configuration
+        const bot = tradingService.createBotFromConfig(selectedConfig);
+        if (bot) {
+          console.log('🤖 Trading bot created for config:', selectedConfig.id);
+          
+          // Update bot with chart lines immediately after drawings are loaded
+          if (selectedConfig.layout_data) {
+            tradingService.updateBotWithChartLines(selectedConfig.id, selectedConfig.layout_data);
+            console.log('📊 Trading bot updated with chart lines');
+          }
+        }
+      };
+      
+      loadImmediately();
     }
-  }, [selectedConfig]);
+  }, [selectedConfig?.id]); // Only depend on the ID, not the entire object
 
   // Handle save requests from parent component
+  // Track the last processed save request to avoid duplicate saves
+  const lastSaveRequestRef = useRef(0);
+  
   useEffect(() => {
-    console.log('🔔 Save trigger changed:', onSaveRequested);
-    console.log('🔔 Selected config:', selectedConfig);
-    console.log('🔔 Widget ref:', widgetRef.current ? 'Ready' : 'Not ready');
-    
-    if (onSaveRequested && selectedConfig && selectedConfig.id) {
+    if (onSaveRequested > 0 && selectedConfig && selectedConfig.id) {
+      // Only process if this is a new save request (not a re-render with old value)
+      if (onSaveRequested === lastSaveRequestRef.current) {
+        console.log('⏭️ Skipping duplicate save request');
+        return;
+      }
+      
+      lastSaveRequestRef.current = onSaveRequested;
       console.log('💾 Save requested for config:', selectedConfig.id);
-      saveDrawingsToConfig(selectedConfig.id, selectedConfig);
-    } else {
-      console.log('⚠️ Save not triggered because:');
-      console.log('  - onSaveRequested:', onSaveRequested);
-      console.log('  - selectedConfig:', selectedConfig);
-      console.log('  - selectedConfig.id:', selectedConfig?.id);
+      console.log('💾 onSaveRequested value:', onSaveRequested);
+      
+      // Save drawings and then reload them to redraw on chart
+      const saveAndReload = async () => {
+        // Double-check config is still selected before starting save
+        if (!selectedConfig?.id) {
+          console.warn('⚠️ Config changed before save could start, aborting');
+          return;
+        }
+        
+        // Save to backend and get the updated config from PUT response
+        const freshConfig = await saveDrawingsToConfig(selectedConfig.id, selectedConfig);
+        
+        if (freshConfig && freshConfig.layout_data) {
+          console.log('📥 Got fresh config from save, reloading drawings to redraw on chart...');
+          
+          // Pass the fresh data directly to loadDrawingsForConfig (no GET needed!)
+          await loadDrawingsForConfig(freshConfig.id, freshConfig);
+          
+          // Update the bot with the line data from PUT response
+          console.log('🤖 Updating bot with fresh line data after save...');
+          tradingService.updateBotWithChartLines(freshConfig.id, freshConfig.layout_data);
+        } else {
+          console.warn('⚠️ No fresh config data returned from save');
+        }
+      };
+      
+      saveAndReload();
     }
-  }, [onSaveRequested]);
+  }, [onSaveRequested, selectedConfig?.id]);
 
   return (
     <ErrorBoundary>
+      <style>
+        {`
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+        `}
+      </style>
       <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 100px)', backgroundColor: '#1e293b' }}>
         <div
           style={{
@@ -1223,7 +1445,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
             }}
             suppressHydrationWarning
           />
-          {isLoading && (
+          {(isLoading || isDrawingLines) && (
             <div style={{
               position: 'absolute',
               top: 0,
@@ -1231,15 +1453,48 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
               right: 0,
               bottom: 0,
               display: 'flex',
+              flexDirection: 'column',
               justifyContent: 'center',
               alignItems: 'center',
-              backgroundColor: 'rgba(15, 23, 42, 0.8)',
+              backgroundColor: 'rgba(15, 23, 42, 0.9)',
               color: '#e2e8f0',
-              fontSize: '18px',
               zIndex: 10,
               pointerEvents: 'none'
             }}>
-              Loading TradingView Chart...
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '16px'
+              }}>
+                <div style={{
+                  width: '40px',
+                  height: '40px',
+                  border: '4px solid #334155',
+                  borderTop: '4px solid #3b82f6',
+                  borderRadius: '50%',
+                  animation: 'spin 1s linear infinite'
+                }} />
+                <div style={{
+                  fontSize: '18px',
+                  fontWeight: '500',
+                  color: '#e2e8f0'
+                }}>
+                  {loadingMessage}
+                </div>
+                
+                {/* Additional Info for Drawing Lines */}
+                {isDrawingLines && (
+                  <div style={{
+                    fontSize: '14px',
+                    color: '#94a3b8',
+                    textAlign: 'center',
+                    maxWidth: '300px'
+                  }}>
+                    Please wait while we load your configuration drawings...
+                  </div>
+                )}
+              </div>
             </div>
           )}
           

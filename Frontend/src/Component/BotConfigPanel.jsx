@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import tradingService from '../services/trading/TradingService.js';
 import './BotConfigPanel.css';
 
 const BotConfigPanel = ({ 
@@ -24,6 +25,8 @@ const BotConfigPanel = ({
   });
 
   const [trades, setTrades] = useState([]);
+  const [tradingStatus, setTradingStatus] = useState(null);
+  const [botStatus, setBotStatus] = useState(null);
 
   useEffect(() => {
     if (selectedConfig) {
@@ -32,8 +35,26 @@ const BotConfigPanel = ({
         name: selectedConfig.name || '',
         symbol: selectedConfig.symbol || 'AAPL'
       }));
+      
+      // Get bot status for this configuration
+      const status = tradingService.getBotStatus(selectedConfig.id);
+      setBotStatus(status);
     }
   }, [selectedConfig]);
+
+  // Monitor bot status updates
+  useEffect(() => {
+    if (!selectedConfig?.id) return;
+
+    const interval = setInterval(() => {
+      const status = tradingService.getBotStatus(selectedConfig.id);
+      if (status) {
+        setBotStatus(status);
+      }
+    }, 2000); // Reduced frequency from 1000ms to 2000ms
+
+    return () => clearInterval(interval);
+  }, [selectedConfig?.id]);
 
   const handleConfigChange = (field, value) => {
     setConfig(prev => ({ ...prev, [field]: value }));
@@ -45,8 +66,33 @@ const BotConfigPanel = ({
   };
 
   const handleStart = () => {
-    console.log('Starting bot for config:', selectedConfig);
-    // Implementation for starting the bot
+    if (!selectedConfig?.id) {
+      console.warn('No configuration selected');
+      return;
+    }
+    
+    console.log('Starting bot for config:', selectedConfig.id);
+    const success = tradingService.startTrading(selectedConfig.id);
+    if (success) {
+      console.log('✅ Bot started successfully');
+    } else {
+      console.error('❌ Failed to start bot');
+    }
+  };
+
+  const handleStop = () => {
+    if (!selectedConfig?.id) {
+      console.warn('No configuration selected');
+      return;
+    }
+    
+    console.log('Stopping bot for config:', selectedConfig.id);
+    const success = tradingService.stopTrading(selectedConfig.id);
+    if (success) {
+      console.log('⏹️ Bot stopped successfully');
+    } else {
+      console.error('❌ Failed to stop bot');
+    }
   };
 
   const handleClone = () => {
@@ -55,11 +101,19 @@ const BotConfigPanel = ({
   };
 
   const handleReject = () => {
-    console.log('Rejecting config:', selectedConfig);
-    // Implementation for rejecting the configuration
+    if (!selectedConfig?.id) {
+      console.warn('No configuration selected');
+      return;
+    }
+    
+    console.log('Emergency stop for config:', selectedConfig.id);
+    const success = tradingService.emergencyStop(selectedConfig.id);
+    if (success) {
+      console.log('🚨 Emergency stop activated');
+    } else {
+      console.error('❌ Failed to emergency stop');
+    }
   };
-
-  console.log('🔍 BotConfigPanel rendering with selectedConfig:', selectedConfig);
 
   return (
     <div className="bot-config-panel">
@@ -190,11 +244,49 @@ const BotConfigPanel = ({
         </div>
       </div>
 
+      {/* Trading Status Display */}
+      {botStatus && (
+        <div className="trading-status">
+          <div className="status-item">
+            <span className="status-label">Status:</span>
+            <span className={`status-value ${botStatus.isActive ? 'active' : 'inactive'}`}>
+              {botStatus.isActive ? '🟢 Active' : '🔴 Inactive'}
+            </span>
+          </div>
+          {botStatus.stoppedOut && (
+            <div className="status-item">
+              <span className="status-label">Stop-Out:</span>
+              <span className="status-value stopped">🚨 Stopped Out</span>
+            </div>
+          )}
+          {botStatus.emergencyBrake && (
+            <div className="status-item">
+              <span className="status-label">Emergency:</span>
+              <span className="status-value emergency">🚨 Emergency Stop</span>
+            </div>
+          )}
+          <div className="status-item">
+            <span className="status-label">Position:</span>
+            <span className="status-value">{botStatus.totalPosition || 0}</span>
+          </div>
+          {botStatus.currentPrice > 0 && (
+            <div className="status-item">
+              <span className="status-label">Price:</span>
+              <span className="status-value">${botStatus.currentPrice.toFixed(2)}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="action-buttons">
         <button className="save-btn" onClick={handleSave}>Save</button>
-        <button className="start-btn" onClick={handleStart}>Start</button>
+        {botStatus?.isActive ? (
+          <button className="stop-btn" onClick={handleStop}>Stop</button>
+        ) : (
+          <button className="start-btn" onClick={handleStart}>Start</button>
+        )}
         <button className="clone-btn" onClick={handleClone}>Clone</button>
-        <button className="reject-btn" onClick={handleReject}>Reject</button>
+        <button className="reject-btn" onClick={handleReject}>Emergency</button>
       </div>
 
       <div className="trades-section">

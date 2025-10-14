@@ -85,9 +85,18 @@ const TradingDashboard = () => {
     fetchConfigurations();
   }, []);
 
-  const handleConfigSelect = (config) => {
-    setSelectedConfig(config);
-    console.log('🎯 Selected configuration:', config);
+  const handleConfigSelect = async (config) => {
+    console.log('🎯 Config clicked:', config.id);
+    // Fetch full configuration data from backend to ensure we have layout_data
+    const fullConfig = await loadConfiguration(config.id);
+    if (fullConfig) {
+      setSelectedConfig(fullConfig);
+      console.log('🎯 Selected configuration with full data:', fullConfig);
+    } else {
+      // Fallback to the config from the list if fetch fails
+      setSelectedConfig(config);
+      console.log('⚠️ Using config from list (no full data):', config);
+    }
   };
 
   const handleConfigSave = async (configData) => {
@@ -95,18 +104,29 @@ const TradingDashboard = () => {
     if (selectedConfig) {
       console.log('💾 Updating configuration:', selectedConfig.id);
       await updateConfiguration(selectedConfig.id, configData);
-      // Trigger drawing save
+      // Trigger drawing save (which will reload the config with fresh data)
       console.log('💾 Triggering drawing save...');
       setSaveTrigger(prev => prev + 1);
     } else {
       console.log('💾 Creating new configuration');
-      await saveConfiguration(configData);
+      const newConfig = await saveConfiguration(configData);
+      setSelectedConfig(newConfig);
     }
   };
 
   const handleConfigCreate = async (configData) => {
     try {
       const savedConfig = await saveConfiguration(configData);
+      // Ensure layout_data is initialized
+      if (!savedConfig.layout_data) {
+        savedConfig.layout_data = {
+          entry_line: null,
+          exit_line: null,
+          tpsl_settings: null,
+          bot_configuration: null,
+          other_drawings: null
+        };
+      }
       setSelectedConfig(savedConfig);
       console.log('✅ New configuration created and selected:', savedConfig);
     } catch (error) {
@@ -120,13 +140,36 @@ const TradingDashboard = () => {
   };
 
   const handleSaveDrawings = async (configId, configData) => {
+    console.log('🔍 handleSaveDrawings called for config:', configId);
+    console.log('🔍 Call stack:', new Error().stack);
+    
     if (configId && configId !== 'undefined') {
+      // Check if this config is still selected before saving
+      if (selectedConfig?.id !== configId) {
+        console.warn(`⚠️ Config ${configId} is no longer selected, skipping backend save`);
+        return;
+      }
+      
       console.log('🔄 Saving drawings to backend for config:', configId);
       try {
-        await updateConfiguration(configId, configData);
+        // PUT request and wait for it to complete
+        const updatedConfig = await updateConfiguration(configId, configData);
         console.log('✅ Drawings saved to backend successfully');
+        console.log('✅ Using PUT response data (no additional GET needed)');
+        
+        // Use the response from PUT directly - it already has the saved data
+        if (updatedConfig && selectedConfig && selectedConfig.id === configId) {
+          console.log('🔍 Updated config layout_data:', updatedConfig.layout_data);
+          console.log('🔍 Entry line:', updatedConfig.layout_data?.entry_line);
+          console.log('🔍 Exit line:', updatedConfig.layout_data?.exit_line);
+          setSelectedConfig(updatedConfig);
+          console.log('✅ Selected config updated with saved data from PUT response');
+        }
+        
+        return updatedConfig;
       } catch (error) {
         console.error('❌ Error saving drawings to backend:', error);
+        throw error;
       }
     } else {
       console.warn('⚠️ Cannot save drawings: No valid configuration ID');
@@ -134,7 +177,10 @@ const TradingDashboard = () => {
   };
 
   const handleLoadDrawings = async (configId) => {
-    return await loadConfiguration(configId);
+    console.log('📥 TradingDashboard: Loading drawings for config:', configId);
+    const result = await loadConfiguration(configId);
+    console.log('📥 TradingDashboard: Load result:', result);
+    return result;
   };
 
   return (
