@@ -62,10 +62,7 @@ const BotConfigPanel = ({
   console.log('🔍 BotConfigPanel rendering with selectedConfig:', selectedConfig);
 
   return (
-    <div className="bot-config-panel" style={{ border: '2px solid blue', padding: '10px' }}>
-      <div style={{ color: 'yellow', fontWeight: 'bold', marginBottom: '10px' }}>
-        DEBUG: BotConfigPanel is rendering!
-      </div>
+    <div className="bot-config-panel">
       <div className="config-title">
         {selectedConfig ? `${selectedConfig.id} - ${selectedConfig.name}` : 'No Configuration Selected'}
       </div>
