@@ -6,9 +6,9 @@ import Home from "./Component/pages/Home";
 import Login from "./Component/pages/Login";
 import Profile from "./Component/pages/Profile";
 import ChangePassword from "./Component/pages/ChangePassword";
-// import TradingViewWidget from "./Component/pages/TradingView";
-import { AuthContext } from "./context/AuthContext";
 import TradingViewWidget from "./Component/pages/TradingView";
+import TradingDashboard from "./Component/pages/TradingDashboard";
+import { AuthContext } from "./context/AuthContext";
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(
@@ -29,7 +29,9 @@ export default function App() {
   };
 
   const bareRoutes = ["/login"]; 
+  const noSidebarRoutes = ["/trading-dashboard"];
   const isBare = bareRoutes.includes(location.pathname);
+  const hideSidebar = noSidebarRoutes.includes(location.pathname);
 
   return (
     <AuthContext.Provider value={{ isAuthenticated, setIsAuthenticated }}>
@@ -38,10 +40,10 @@ export default function App() {
           <Navbar isSidebarOpen={isSidebarOpen} toggleSidebar={toggleSidebar} />
         )}
         <div className={`flex ${isBare ? "" : "pt-16"}`}>
-          {!isBare && (
+          {!isBare && !hideSidebar && (
             <Sidebar isOpen={isSidebarOpen} toggleSidebar={toggleSidebar} />
           )}
-          <main className={`flex-1 min-w-0 ${!isBare && isSidebarOpen ? "p-6" : "p-4"}`}>
+          <main className={`flex-1 min-w-0 ${!isBare && !hideSidebar && isSidebarOpen ? "p-6" : "p-4"}`}>
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/login" element={<Login />} />
@@ -62,6 +64,16 @@ export default function App() {
                 }
               />
               <Route path="/stock/:symbol" element={<TradingViewWidget />} />
+              <Route 
+                path="/trading-dashboard" 
+                element={
+                  isAuthenticated ? (
+                    <div className="no-padding">
+                      <TradingDashboard />
+                    </div>
+                  ) : <Navigate to="/login" replace />
+                } 
+              />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>

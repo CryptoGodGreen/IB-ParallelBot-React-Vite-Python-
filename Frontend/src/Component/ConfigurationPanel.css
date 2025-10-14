@@ -1,0 +1,167 @@
+.config-panel {
+  width: 100%;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 16px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.config-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.config-header h3 {
+  color: #e2e8f0;
+  margin: 0;
+  font-size: 18px;
+}
+
+.add-config-btn {
+  background: #3b82f6;
+  border: none;
+  color: white;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+.add-config-btn:hover {
+  background: #2563eb;
+}
+
+.new-config-form {
+  background: #0f172a;
+  padding: 16px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  border: 1px solid #334155;
+}
+
+.new-config-form input,
+.new-config-form select {
+  width: 100%;
+  padding: 8px;
+  margin-bottom: 8px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  color: #e2e8f0;
+  font-size: 14px;
+}
+
+.new-config-form input::placeholder {
+  color: #94a3b8;
+}
+
+.form-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.save-btn {
+  background: #10b981;
+  border: none;
+  color: white;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  flex: 1;
+}
+
+.cancel-btn {
+  background: #6b7280;
+  border: none;
+  color: white;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  flex: 1;
+}
+
+.config-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.config-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s;
+  border: 1px solid transparent;
+}
+
+.config-item:hover {
+  background: #334155;
+}
+
+.config-item.selected {
+  background: #1e40af;
+  border-color: #3b82f6;
+}
+
+.config-item.active {
+  border-left: 4px solid #10b981;
+}
+
+.config-item.stopped {
+  border-left: 4px solid #ef4444;
+}
+
+.config-info {
+  flex: 1;
+}
+
+.config-id {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 2px;
+}
+
+.config-name {
+  font-size: 14px;
+  color: #e2e8f0;
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.config-details {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.delete-btn {
+  background: none;
+  border: none;
+  color: #ef4444;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  font-size: 16px;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.delete-btn:hover {
+  opacity: 1;
+  background: rgba(239, 68, 68, 0.1);
+}

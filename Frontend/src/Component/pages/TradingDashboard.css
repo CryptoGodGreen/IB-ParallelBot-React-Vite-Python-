@@ -1,0 +1,79 @@
+.no-padding {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+.trading-dashboard {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.dashboard-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.dashboard-left {
+  width: 390px;
+  padding: 16px;
+  background: #1e293b;
+  border-right: 1px solid #334155;
+  overflow-y: auto;
+}
+
+.dashboard-center {
+  flex: 1;
+  min-width: 0;
+  background: #0f172a;
+}
+
+.dashboard-right {
+  width: 340px;
+  padding: 16px;
+  background: #1e293b;
+  border-left: 1px solid #334155;
+  overflow-y: auto;
+}
+
+/* Responsive design */
+@media (max-width: 1400px) {
+  .dashboard-left {
+    width: 300px;
+  }
+  .dashboard-right {
+    width: 260px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .dashboard-left {
+    width: 280px;
+  }
+  .dashboard-right {
+    width: 240px;
+  }
+}
+
+@media (max-width: 768px) {
+  .dashboard-main {
+    flex-direction: column;
+  }
+  
+  .dashboard-left {
+    width: 100%;
+    height: 200px;
+    border-right: none;
+    border-bottom: 1px solid #334155;
+  }
+  
+  .dashboard-right {
+    width: 100%;
+    height: 200px;
+    border-left: none;
+    border-top: 1px solid #334155;
+  }
+}

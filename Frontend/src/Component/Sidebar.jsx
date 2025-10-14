@@ -46,6 +46,24 @@ export default function Sidebar({ isOpen, toggleSidebar }) {
               ✖
             </button>
           </div>
+          
+          {/* Trading Dashboard Link */}
+          <div className="mb-4">
+            <Link
+              to="/trading-dashboard"
+              className={`block px-3 py-2 rounded-xl transition border ${
+                location.pathname === "/trading-dashboard"
+                  ? "bg-green-600/20 border-green-600/30 text-green-200"
+                  : "hover:bg-slate-800/60 border-slate-800 text-slate-200"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-semibold tracking-wide">📊 Trading Dashboard</span>
+              </div>
+              <div className="text-xs truncate text-slate-400">Configurations & Drawings</div>
+            </Link>
+          </div>
+          
           <div className="space-y-1">
             {items.map((item) => {
               const href = `/stock/${item.symbol}`;

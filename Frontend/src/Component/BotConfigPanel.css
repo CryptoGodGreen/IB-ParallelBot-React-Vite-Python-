@@ -1,0 +1,155 @@
+.bot-config-panel {
+  width: 350px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 20px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.config-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #e2e8f0;
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.config-form {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.form-row label {
+  min-width: 120px;
+  font-size: 12px;
+  color: #94a3b8;
+  text-align: right;
+}
+
+.form-row input,
+.form-row select {
+  flex: 1;
+  padding: 6px 8px;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
+.form-row input:focus,
+.form-row select:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  margin: 20px 0;
+}
+
+.action-buttons button {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.save-btn {
+  background: #6b7280;
+  color: white;
+}
+
+.save-btn:hover {
+  background: #4b5563;
+}
+
+.start-btn {
+  background: #10b981;
+  color: white;
+}
+
+.start-btn:hover {
+  background: #059669;
+}
+
+.clone-btn {
+  background: #3b82f6;
+  color: white;
+}
+
+.clone-btn:hover {
+  background: #2563eb;
+}
+
+.reject-btn {
+  background: #ef4444;
+  color: white;
+}
+
+.reject-btn:hover {
+  background: #dc2626;
+}
+
+.trades-section {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.trades-header {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #334155;
+  font-size: 10px;
+  color: #94a3b8;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.trades-list {
+  min-height: 100px;
+}
+
+.no-trades {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100px;
+  color: #6b7280;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.trade-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 11px;
+  color: #e2e8f0;
+  border-bottom: 1px solid #1e293b;
+}
+
+.trade-row:last-child {
+  border-bottom: none;
+}
