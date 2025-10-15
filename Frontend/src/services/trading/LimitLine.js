@@ -14,13 +14,18 @@ export class LimitLine {
     this.lastUpdateTime = 0;
     this.isActive = true;
     this.orderSize = options.orderSize || 0;
+    this.targetShares = options.targetShares || 0; // Matching old Ruby system
     this.maxOrderSize = options.maxOrderSize || 1000;
     this.minOrderSize = options.minOrderSize || 10;
+    this.isEntryLine = options.isEntryLine || false; // Boolean flag like old system
+    this.chartSide = options.chartSide || 'B'; // Chart side for order direction logic
     
     // Order management
     this.placedOrders = [];
     this.pendingOrders = [];
     this.filledOrders = [];
+    this._sharesFilledProperty = 0; // Total shares filled (matching old Ruby system)
+    this.currentOrder = null; // Current active order (matching old Ruby system)
     
     // Calculate initial slope and intercept
     this.calculateSlopeAndIntercept();
@@ -55,7 +60,85 @@ export class LimitLine {
     // Calculate intercept: b = y1 - m * x1
     this.intercept = y1 - this.slope * x1;
 
-    console.log(`LimitLine ${this.id}: slope=${this.slope.toFixed(4)}, intercept=${this.intercept.toFixed(2)}`);
+    // Determine line direction and characteristics
+    this.direction = this.getLineDirection();
+    this.slopeStrength = this.getSlopeStrength();
+    this.isTrendFollowing = this.slopeStrength > 0.1; // Significant trend if slope > 0.1
+
+    console.log(`LimitLine ${this.id}: slope=${this.slope.toFixed(4)}, direction=${this.direction}, strength=${this.slopeStrength.toFixed(4)}`);
+  }
+
+  /**
+   * Determine line direction based on slope
+   * @returns {string} 'upward', 'downward', or 'horizontal'
+   */
+  getLineDirection() {
+    const slopeThreshold = 0.001; // Minimum slope to be considered trending
+    
+    if (this.slope > slopeThreshold) {
+      return 'upward';
+    } else if (this.slope < -slopeThreshold) {
+      return 'downward';
+    } else {
+      return 'horizontal';
+    }
+  }
+
+  /**
+   * Get slope strength as absolute value
+   * @returns {number} Absolute slope value
+   */
+  getSlopeStrength() {
+    return Math.abs(this.slope);
+  }
+
+  /**
+   * Check if line direction is suitable for entry role
+   * @param {string} marketContext - 'bullish', 'bearish', or 'neutral'
+   * @returns {boolean} True if suitable for entry
+   */
+  isSuitableForEntry(marketContext = 'neutral') {
+    // For entry lines, we want to buy in the direction of the trend
+    // or at support/resistance levels
+    
+    if (this.direction === 'horizontal') {
+      return true; // Horizontal lines work as entry for both directions
+    }
+    
+    switch (marketContext) {
+      case 'bullish':
+        // In bullish market, prefer upward lines or horizontal support
+        return this.direction === 'upward' || this.direction === 'horizontal';
+      case 'bearish':
+        // In bearish market, prefer downward lines or horizontal resistance  
+        return this.direction === 'downward' || this.direction === 'horizontal';
+      default:
+        return true; // Neutral market accepts any direction
+    }
+  }
+
+  /**
+   * Check if line direction is suitable for exit role
+   * @param {string} marketContext - 'bullish', 'bearish', or 'neutral'
+   * @returns {boolean} True if suitable for exit
+   */
+  isSuitableForExit(marketContext = 'neutral') {
+    // For exit lines, we want to take profits or stop losses
+    
+    if (this.direction === 'horizontal') {
+      return true; // Horizontal lines work for both profit and stop loss
+    }
+    
+    switch (marketContext) {
+      case 'bullish':
+        // In bullish market, upward lines are profit targets, downward lines are stop losses
+        return true; // Both work in different contexts
+      case 'bearish':
+        // In bearish market, downward lines are profit targets, upward lines are stop losses
+        return true; // Both work in different contexts
+      default:
+        return true; // Neutral market accepts any direction
+    }
   }
 
   /**
@@ -217,6 +300,101 @@ export class LimitLine {
   }
 
   /**
+   * Check if line is active - matching old Ruby logic (lines 57-59)
+   * @returns {boolean} True if line has unfilled shares
+   */
+  isActiveLine() {
+    return this.sharesFilled() < this.targetShares;
+  }
+
+  /**
+   * Get shares filled - matching old Ruby logic (lines 61-63)
+   * @returns {number} Total shares filled
+   */
+  sharesFilled() {
+    return this.filledOrders.reduce((total, order) => total + order.size, 0);
+  }
+
+  /**
+   * Cancel current order - matching old Ruby logic (lines 65-69)
+   */
+  cancelOrder() {
+    if (this.currentOrder) {
+      // In real implementation, this would call the broker API to cancel
+      console.log(`LimitLine ${this.id}: Cancelling order ${this.currentOrder.id}`);
+      this.currentOrder.status = 'cancelled';
+      this.currentOrder = null;
+    }
+  }
+
+  /**
+   * Update order - matching old Ruby logic (lines 71-118)
+   * @param {boolean} forceUpdate - Force order update regardless of price changes
+   */
+  updateOrder(forceUpdate = false) {
+    // Don't update if emergency brake is on (matching old logic line 72)
+    if (this.emergencyBrake) {
+      return;
+    }
+
+    const price = this.calculateCurrentPrice(this.getCurrentCandleIndex());
+    const lotSize = this.targetShares - this.sharesFilled();
+    
+    // Determine side based on chart side and line type (matching old logic lines 76-78)
+    let side = 'B'; // Default to buy
+    if (this.chartSide === 'B' && !this.isEntryLine) {
+      side = 'S'; // Exit line on buy chart = sell
+    }
+    if (this.chartSide === 'S' && this.isEntryLine) {
+      side = 'S'; // Entry line on sell chart = sell
+    }
+
+    if (this.sharesFilled() < this.targetShares) {
+      if (!this.currentOrder) {
+        // Place new order logic (matching old logic lines 80-100)
+        console.log(`LimitLine ${this.id}: Sending new order side: ${side} price: ${price.toFixed(2)} size: ${lotSize}`);
+        
+        const order = {
+          id: this.generateOrderId(),
+          side: side,
+          price: price,
+          size: lotSize,
+          status: 'pending',
+          timestamp: Date.now()
+        };
+        
+        this.currentOrder = order;
+        this.pendingOrders.push(order);
+        
+        console.log(`LimitLine ${this.id}: New order placed:`, order);
+      } else {
+        // Update existing order logic (matching old logic lines 101-118)
+        const currentOrderPrice = this.currentOrder.price;
+        const currentOrderSize = this.currentOrder.size;
+        
+        if (forceUpdate || currentOrderPrice !== price || currentOrderSize !== lotSize) {
+          console.log(`LimitLine ${this.id}: Updating order side: ${side} price: ${price.toFixed(2)} size: ${lotSize}`);
+          
+          this.currentOrder.price = price;
+          this.currentOrder.size = lotSize;
+          this.currentOrder.lastUpdate = Date.now();
+          
+          console.log(`LimitLine ${this.id}: Order updated`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Get current candle index - helper method
+   */
+  getCurrentCandleIndex() {
+    const now = Date.now();
+    const marketOpen = new Date().setHours(9, 30, 0, 0); // 9:30 AM EST
+    return Math.floor((now - marketOpen) / 60000); // 1-minute candles
+  }
+
+  /**
    * Get line status summary
    * @returns {Object} Status summary
    */
@@ -225,14 +403,20 @@ export class LimitLine {
       id: this.id,
       type: this.type,
       rank: this.rank,
-      isActive: this.isActive,
+      isActive: this.isActiveLine(),
       currentPrice: this.currentPrice,
       slope: this.slope,
       intercept: this.intercept,
+      direction: this.direction || 'unknown',
+      slopeStrength: this.slopeStrength || 0,
+      isTrendFollowing: this.isTrendFollowing || false,
+      targetShares: this.targetShares,
+      sharesFilled: this.sharesFilled(),
       totalFilled: this.getTotalFilledSize(),
       totalPending: this.getTotalPendingSize(),
       pendingOrders: this.pendingOrders.length,
-      filledOrders: this.filledOrders.length
+      filledOrders: this.filledOrders.length,
+      isEntryLine: this.isEntryLine
     };
   }
 }

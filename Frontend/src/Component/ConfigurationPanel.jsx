@@ -13,7 +13,7 @@ const ConfigurationPanel = ({
   const [newConfig, setNewConfig] = useState({
     name: '',
     symbol: 'AAPL',
-    interval: '1D'
+    interval: '1M'
   });
 
   const handleConfigSelect = (config) => {
@@ -37,7 +37,7 @@ const ConfigurationPanel = ({
       };
       
       console.log('🔧 Calling onConfigCreate with:', configData);
-      setNewConfig({ name: '', symbol: 'AAPL', interval: '1D' });
+      setNewConfig({ name: '', symbol: 'AAPL', interval: '1M' });
       setShowNewConfigForm(false);
       onConfigCreate(configData);
     } else {

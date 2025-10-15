@@ -1050,20 +1050,64 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           },
 
           subscribeBars: (symbolInfo, resolution, onRealtimeCallback, subscriberUID, onResetCacheNeededCallback) => {
-            console.log('[subscribeBars]: Method called', subscriberUID);
+            // Helper function to feed price data to trading bot
+            const updateTradingBot = (bar) => {
+              if (selectedConfig?.id && tradingService) {
+                tradingService.processMarketData(selectedConfig.id, {
+                  price: bar.close,
+                  time: bar.time,
+                  volume: bar.volume,
+                  high: bar.high,
+                  low: bar.low,
+                  open: bar.open
+                });
+              }
+            };
+            console.log('[subscribeBars]: Method called', {
+              subscriberUID,
+              symbol: symbolInfo.name,
+              resolution: resolution,
+              resolutionType: typeof resolution
+            });
             
-            // Set up polling for real-time updates
-            const pollInterval = resolution === '1' ? 10000 : 30000; // 10s for 1min, 30s for others
+            // Set up polling for real-time updates based on resolution
+            // For 1-minute charts, we need very frequent updates (every 1-5 seconds)
+            // For other intervals, we can update less frequently
+            let pollInterval;
+            if (resolution === '1' || resolution === 1 || resolution === '1m') {
+              pollInterval = 5000; // 5 seconds for 1-minute charts
+              console.log('⏰ Using 1-minute polling interval (5s)');
+            } else if (resolution === '5' || resolution === 5 || resolution === '5m') {
+              pollInterval = 15000; // 15 seconds for 5-minute charts
+              console.log('⏰ Using 5-minute polling interval (15s)');
+            } else {
+              pollInterval = 30000; // 30 seconds for other intervals
+              console.log('⏰ Using default polling interval (30s)');
+            }
             let lastBar = null;
             
             const updateBar = async () => {
               try {
                 const now = Math.floor(Date.now() / 1000);
-                const from = now - 86400; // Last 24 hours
+                // For real-time updates, we only need the most recent bars
+                // Use a smaller time window based on resolution
+                const resolutionMinutes = parseInt(resolution) || 1;
+                const timeWindow = resolutionMinutes * 60 * 10; // 10x the resolution in seconds
+                const from = now - timeWindow;
                 const to = now;
                 
+                console.log(`🔄 [subscribeBars] Fetching real-time data for ${resolution}-min chart:`, {
+                  resolutionMinutes,
+                  timeWindow,
+                  from: new Date(from * 1000).toISOString(),
+                  to: new Date(to * 1000).toISOString()
+                });
+                
+                // For 1-minute charts, always request more recent data and use countback
+                const countback = resolution === '1' || resolution === 1 ? 10 : 5;
+                
                 const response = await fetch(
-                  `http://localhost:8000/udf/history?symbol=${symbolInfo.name}&from_timestamp=${from}&to_timestamp=${to}&resolution=${resolution}&countback=2`
+                  `http://localhost:8000/udf/history?symbol=${symbolInfo.name}&from_timestamp=${from}&to_timestamp=${to}&resolution=${resolution}&countback=${countback}`
                 );
                 
                 if (!response.ok) {
@@ -1075,15 +1119,18 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                 
                 console.log('[subscribeBars]: Polling response', {
                   symbol: symbolInfo.name,
+                  resolution: resolution,
                   status: data.s,
-                  barsCount: data.t?.length || 0
+                  barsCount: data.t?.length || 0,
+                  currentTime: new Date().toISOString(),
+                  lastTimestamp: data.t && data.t.length > 0 ? new Date(data.t[data.t.length - 1] * 1000).toISOString() : 'none'
                 });
                 
                 if (data.s === 'ok' && data.t && data.t.length > 0) {
-                  // Get the latest bar
+                  // Get the latest bar (most recent)
                   const lastIndex = data.t.length - 1;
                   const bar = {
-                    time: data.t[lastIndex] * 1000,
+                    time: data.t[lastIndex] * 1000, // Convert to milliseconds
                     open: parseFloat(data.o[lastIndex]),
                     high: parseFloat(data.h[lastIndex]),
                     low: parseFloat(data.l[lastIndex]),
@@ -1091,44 +1138,84 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                     volume: parseFloat(data.v[lastIndex]) || 0
                   };
                   
+                  // Enhanced logging for debugging
+                  const barTime = new Date(bar.time);
+                  const lastBarTime = lastBar ? new Date(lastBar.time) : null;
+                  
+                  console.log('[subscribeBars]: Processing bar', {
+                    resolution: resolution,
+                    barTime: barTime.toISOString(),
+                    barTimeMinutes: barTime.getMinutes(),
+                    barTimeSeconds: barTime.getSeconds(),
+                    lastBarTime: lastBarTime ? lastBarTime.toISOString() : 'none',
+                    lastBarTimeMinutes: lastBarTime ? lastBarTime.getMinutes() : 'none',
+                    timeDiff: lastBar ? (bar.time - lastBar.time) / 1000 : 'first',
+                    close: bar.close
+                  });
+                  
                   // Check if this is a new bar or an update to the current bar
                   if (!lastBar) {
-                    // First bar
-                    console.log('[subscribeBars]: Initial bar', {
-                      time: new Date(bar.time).toISOString(),
+                    // First bar - always send it
+                    console.log('[subscribeBars]: ✅ Initial bar sent', {
+                      time: barTime.toISOString(),
                       close: bar.close,
                       volume: bar.volume
                     });
                     onRealtimeCallback(bar);
+                    updateTradingBot(bar);
                     lastBar = bar;
                   } else if (bar.time > lastBar.time) {
-                    // New bar started
-                    console.log('[subscribeBars]: New bar detected', {
-                      oldTime: new Date(lastBar.time).toISOString(),
-                      newTime: new Date(bar.time).toISOString(),
+                    // New bar started - this should happen every minute for 1-min charts
+                    console.log('[subscribeBars]: ✅ NEW BAR detected', {
+                      resolution: resolution,
+                      oldTime: lastBarTime.toISOString(),
+                      newTime: barTime.toISOString(),
+                      timeDiffSeconds: (bar.time - lastBar.time) / 1000,
                       close: bar.close
                     });
                     onRealtimeCallback(bar);
+                    updateTradingBot(bar);
                     lastBar = bar;
                   } else if (bar.time === lastBar.time) {
-                    // Update current bar (price/volume changed)
+                    // Same timestamp - update current bar if data changed
                     const hasChanged = 
-                      bar.close !== lastBar.close ||
-                      bar.high !== lastBar.high ||
-                      bar.low !== lastBar.low ||
-                      bar.volume !== lastBar.volume;
+                      Math.abs(bar.close - lastBar.close) > 0.0001 ||
+                      Math.abs(bar.high - lastBar.high) > 0.0001 ||
+                      Math.abs(bar.low - lastBar.low) > 0.0001 ||
+                      Math.abs(bar.volume - lastBar.volume) > 0.0001;
                     
-                    if (hasChanged) {
-                      console.log('[subscribeBars]: Bar updated', {
-                        time: new Date(bar.time).toISOString(),
+                    // For 1-minute charts, be more aggressive about updates
+                    const isOneMinute = resolution === '1' || resolution === 1;
+                    
+                    if (hasChanged || isOneMinute) {
+                      console.log('[subscribeBars]: ✅ Current bar updated', {
+                        resolution: resolution,
+                        time: barTime.toISOString(),
                         oldClose: lastBar.close,
                         newClose: bar.close,
                         oldVolume: lastBar.volume,
-                        newVolume: bar.volume
+                        newVolume: bar.volume,
+                        changed: hasChanged,
+                        forcedUpdate: isOneMinute && !hasChanged
                       });
                       onRealtimeCallback(bar);
+                      updateTradingBot(bar);
                       lastBar = bar;
+                    } else {
+                      console.log('[subscribeBars]: ⏸️ No changes detected for current bar', {
+                        resolution: resolution,
+                        time: barTime.toISOString(),
+                        close: bar.close,
+                        volume: bar.volume
+                      });
                     }
+                  } else {
+                    // This shouldn't happen - bar.time < lastBar.time
+                    console.warn('[subscribeBars]: ⚠️ Received older bar', {
+                      receivedTime: barTime.toISOString(),
+                      lastBarTime: lastBarTime.toISOString(),
+                      skipping: true
+                    });
                   }
                 }
               } catch (error) {
@@ -1136,8 +1223,9 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
               }
             };
             
-            // Initial update after a short delay
-            setTimeout(updateBar, 1000);
+            // Initial update - faster for shorter timeframes
+            const initialDelay = resolution === '1' || resolution === 1 ? 500 : 1000;
+            setTimeout(updateBar, initialDelay);
             
             // Set up polling interval
             const intervalId = setInterval(updateBar, pollInterval);
@@ -1185,10 +1273,25 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           }
         };
 
+        // Helper function to convert interval format (1M -> 1, 5M -> 5, 1D -> D, etc.)
+        const convertInterval = (interval) => {
+          if (interval === '1M') return '1';
+          if (interval === '5M') return '5';
+          if (interval === '15M') return '15';
+          if (interval === '30M') return '30';
+          if (interval === '1H') return '60';
+          if (interval === '4H') return '240';
+          if (interval === '1D') return 'D';
+          if (interval === '1W') return 'W';
+          return '1'; // Default to 1 minute
+        };
+
+        const initialInterval = selectedConfig?.interval ? convertInterval(selectedConfig.interval) : '1';
+        
         const widgetOptions = {
-          symbol: symbol || 'AAPL',
+          symbol: symbol || selectedConfig?.symbol || 'AAPL',
           datafeed: datafeed,
-          interval: '1',
+          interval: initialInterval,
           container: containerRef.current,
           library_path: '/charting_library/',
           locale: 'en',
@@ -1349,6 +1452,36 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
       const loadImmediately = async () => {
         console.log('⚡ Loading configuration immediately...');
         setLoadingMessage('Switching configuration...');
+        
+        // Set symbol and interval from the selected configuration
+        if (selectedConfig.symbol || selectedConfig.interval) {
+          try {
+            const symbol = selectedConfig.symbol || 'AAPL';
+            const interval = selectedConfig.interval || '1M';
+            
+            // Convert interval format for TradingView (1M -> 1, etc.)
+            const convertInterval = (interval) => {
+              if (interval === '1M') return '1';
+              if (interval === '5M') return '5';
+              if (interval === '15M') return '15';
+              if (interval === '30M') return '30';
+              if (interval === '1H') return '60';
+              if (interval === '4H') return '240';
+              if (interval === '1D') return 'D';
+              if (interval === '1W') return 'W';
+              return '1'; // Default to 1 minute
+            };
+            
+            const convertedInterval = convertInterval(interval);
+            console.log(`🔄 Setting symbol to ${symbol} and interval to ${interval} (converted: ${convertedInterval})`);
+            widgetRef.current.setSymbol(symbol, convertedInterval, () => {
+              console.log('✅ Symbol and interval updated successfully');
+            });
+          } catch (error) {
+            console.warn('⚠️ Could not update symbol/interval:', error);
+          }
+        }
+        
         await loadDrawingsForConfig(selectedConfig.id);
         
         // Initialize trading bot with configuration

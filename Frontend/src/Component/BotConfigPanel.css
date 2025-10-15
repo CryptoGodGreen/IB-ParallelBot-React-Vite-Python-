@@ -55,7 +55,8 @@
 }
 
 .action-buttons {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin: 20px 0;
 }
@@ -114,6 +115,50 @@
 
 .stop-btn:hover {
   background: #d97706;
+}
+
+.market-buy-btn {
+  background: #8b5cf6;
+  color: white;
+  font-weight: 600;
+  grid-column: 1 / -1; /* Span full width */
+}
+
+.market-buy-btn:hover {
+  background: #7c3aed;
+}
+
+.order-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 6px;
+  margin: 16px 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.order-status.pending {
+  background: #1e3a8a;
+  color: #93c5fd;
+  border: 1px solid #3b82f6;
+}
+
+.order-status.success {
+  background: #064e3b;
+  color: #6ee7b7;
+  border: 1px solid #10b981;
+}
+
+.order-status.error {
+  background: #7f1d1d;
+  color: #fca5a5;
+  border: 1px solid #ef4444;
+}
+
+.status-indicator {
+  font-size: 16px;
 }
 
 .trading-status {

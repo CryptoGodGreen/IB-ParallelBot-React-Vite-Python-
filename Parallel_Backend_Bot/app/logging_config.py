@@ -41,6 +41,9 @@ LOGGING_CONFIG = {
     "sqlalchemy.pool": {"handlers": ["default"], "level": SQL_LOG_LEVEL, "propagate": False},
     "sqlalchemy.orm": {"handlers": ["default"], "level": SQL_LOG_LEVEL, "propagate": False},
     "parallel_bot": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
+    "app": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
+    "app.api": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
+    "app.api.udf": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
     },
     "handlers": {
         "default": {

@@ -62,6 +62,7 @@ class ChartService {
   // Create a new chart
   async createChart(chartData) {
     try {
+      console.log('📤 Creating chart with data:', chartData);
       const response = await fetch(`${API_BASE_URL}/charts/`, {
         method: 'POST',
         headers: {
@@ -72,7 +73,9 @@ class ChartService {
       });
       
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorText = await response.text();
+        console.error('❌ Chart creation failed:', response.status, errorText);
+        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
       }
       
       return await response.json();
@@ -246,6 +249,40 @@ class ChartService {
     }
     
     return token;
+  }
+
+  // Place a market buy order
+  async placeMarketBuyOrder(symbol, quantity = 1) {
+    try {
+      const token = this.getAuthToken();
+      console.log('🛒 Placing market buy order:', { symbol, quantity });
+      
+      const response = await fetch(`${API_BASE_URL}/orders/market-buy`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          symbol: symbol,
+          quantity: quantity
+        })
+      });
+      
+      if (!response.ok) {
+        console.error('❌ Order API Error:', response.status, response.statusText);
+        const errorData = await response.json();
+        console.error('Error details:', errorData);
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      console.log('✅ Order placed successfully:', result);
+      return result;
+    } catch (error) {
+      console.error('Error placing market buy order:', error);
+      throw error;
+    }
   }
 }
 

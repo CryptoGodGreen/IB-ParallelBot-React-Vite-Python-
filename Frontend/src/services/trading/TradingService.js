@@ -54,10 +54,17 @@ export class TradingService {
         id: `bot_${configId}`,
         name: configData.name,
         symbol: configData.symbol,
+        chartSide: botConfig.chart_side || 'B', // Default to buy side
+        chartRight: botConfig.chart_right || 'C', // Default to call
         maxPosition: botConfig.max_position || 10000,
         positionSize: botConfig.position_size || 1000,
         maxDistanceFromEntry: botConfig.max_distance_from_entry || 0.05,
         updateInterval: botConfig.update_interval || 1000,
+        // Old Ruby system stop-out configuration
+        stopOutPercent: botConfig.stop_out_percent || null,
+        stopOutTimeLimit: botConfig.stop_out_time_limit || null, // in minutes
+        hardStopOut: botConfig.hard_stop_out || null, // percentage threshold
+        // Enhanced stop-out rules (keeping for backward compatibility)
         fiveMinuteStopLoss: botConfig.five_minute_stop_loss?.enabled || false,
         fiveMinuteStopLossThreshold: botConfig.five_minute_stop_loss?.threshold || 0.02,
         fifteenMinuteStopLoss: botConfig.fifteen_minute_stop_loss?.enabled || false,
@@ -105,7 +112,7 @@ export class TradingService {
   }
 
   /**
-   * Update bot with TradingView chart lines
+   * Update bot with TradingView chart lines using intelligent line assignment
    * @param {number} configId - Configuration ID
    * @param {Object} layoutData - TradingView layout data
    */
@@ -126,37 +133,51 @@ export class TradingService {
     bot.entryLine = null;
     bot.exitLines = [];
 
-    // Process entry line
-    if (layoutData.entry_line) {
-      const entryLineData = {
+    // Collect all line data for intelligent assignment
+    const allLinesData = [];
+
+    // Add entry line if provided - mark it explicitly as entry line for old Ruby system
+    if (layoutData.entry_line && layoutData.entry_line.p1 && layoutData.entry_line.p2) {
+      allLinesData.push({
         id: 'entry_line',
+        is_entry_line: true, // Explicitly mark as entry line for old Ruby system logic
         points: [
           { time: layoutData.entry_line.p1.time, price: layoutData.entry_line.p1.price },
           { time: layoutData.entry_line.p2.time, price: layoutData.entry_line.p2.price }
         ]
-      };
-      bot.setEntryLine(entryLineData);
-      console.log(`TradingService: Updated entry line for config ${configId}`);
+      });
     }
 
-    // Process exit lines from other_drawings
+    // Add all drawings from TradingView
     if (layoutData.other_drawings && layoutData.other_drawings.tradingview_drawings) {
       const drawings = layoutData.other_drawings.tradingview_drawings;
-      let exitRank = 1;
       
       drawings.forEach(drawing => {
-        if (drawing.name === 'trend_line' && drawing.points && drawing.points.length >= 2) {
-          const exitLineData = {
-            id: drawing.id || `exit_line_${exitRank}`,
-            points: drawing.points,
-            rank: exitRank
-          };
-          
-          bot.addExitLine(exitLineData, exitRank);
-          console.log(`TradingService: Added exit line ${exitRank} for config ${configId}`);
-          exitRank++;
+        // Check if it's a trend line with sufficient points
+        const isTrendLine = drawing.type === 'trend_line' || 
+                           drawing.shape === 'trend_line' || 
+                           drawing.name === 'trend_line' ||
+                           drawing.type === 'LineToolTrendLine' ||
+                           (drawing.points && drawing.points.length >= 2);
+        
+        if (isTrendLine && drawing.points && drawing.points.length >= 2) {
+          allLinesData.push({
+            id: drawing.id || `line_${allLinesData.length}`,
+            is_entry_line: false, // Mark all other lines as exit lines for old Ruby system
+            points: drawing.points
+          });
         }
       });
+    }
+
+    console.log(`TradingService: Found ${allLinesData.length} lines for intelligent assignment`);
+
+    if (allLinesData.length > 0) {
+      // Use intelligent line assignment based on direction and market context
+      bot.assignLinesIntelligently(allLinesData);
+      console.log(`TradingService: Intelligently assigned lines for config ${configId} - Entry: ${bot.entryLine?.id || 'none'}, Exits: ${bot.exitLines.length}`);
+    } else {
+      console.warn(`TradingService: No lines found in layoutData for config ${configId}`);
     }
 
     // Redistribute shares if bot is running
@@ -306,12 +327,32 @@ export class TradingService {
    */
   processMarketData(configId, marketData) {
     const bot = this.activeBots.get(configId);
-    if (!bot || !bot.isRunning) {
+    if (!bot) {
+      console.warn(`TradingService: No bot found for config ${configId} when processing market data`);
+      return;
+    }
+    
+    if (!bot.isRunning) {
+      console.log(`TradingService: Bot for config ${configId} is not running, skipping price update`);
       return;
     }
 
     // Update bot with current market price
-    bot.currentPrice = marketData.price;
+    console.log(`TradingService: Updating bot ${configId} with real-time price ${marketData.price.toFixed(4)}`);
+    
+    // Validate that the price is reasonable
+    if (marketData.price && marketData.price > 0 && marketData.price < 100000) {
+      bot.currentPrice = marketData.price;
+      console.log(`TradingService: Price validated and set to ${bot.currentPrice.toFixed(4)}`);
+    } else {
+      console.warn(`TradingService: Invalid real-time price received: ${marketData.price}`);
+    }
+    
+    // Add timestamp and price to price history for market context
+    if (bot.updateMarketContext) {
+      bot.updateMarketContext(marketData.price);
+    }
+    
     bot.update();
   }
 

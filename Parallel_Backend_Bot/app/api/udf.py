@@ -209,6 +209,13 @@ async def search_symbols(
         logger.error(f"Error searching symbols: {e}")
         raise HTTPException(status_code=500, detail="Error searching symbols")
 
+@router.get("/test-logs")
+async def test_logs():
+    """Test endpoint to verify logging is working"""
+    logger.info("🧪 TEST_LOG: This is a test log message")
+    print("🧪 PRINT_TEST: This is a print statement")
+    return {"status": "test_logs_working", "timestamp": datetime.now().isoformat()}
+
 @router.get("/history")
 async def get_history(
     symbol: str = Query(..., description="Symbol"),
@@ -217,14 +224,33 @@ async def get_history(
     resolution: str = Query(..., description="Resolution"),
     db: AsyncSession = Depends(get_db)
 ):
+    # Add immediate test log to verify logging is working
+    logger.info(f"🚀 HISTORY_ENDPOINT_CALLED: {symbol} at {datetime.now().isoformat()}")
+    
     logger.info(f"Getting history for {symbol} from {from_timestamp} to {to_timestamp} at {resolution}")
+    
+    # Convert timestamps to readable format for debugging - ALWAYS show this regardless of IBKR connection
+    from_time_readable = datetime.fromtimestamp(from_timestamp).isoformat()
+    to_time_readable = datetime.fromtimestamp(to_timestamp).isoformat()
+    current_time_readable = datetime.now().isoformat()
+    
+    logger.info(f"📊 REQUEST_TIMESTAMP_INFO:")
+    logger.info(f"📊   Current time: {current_time_readable}")
+    logger.info(f"📊   Request from: {from_timestamp} = {from_time_readable}")
+    logger.info(f"📊   Request to:   {to_timestamp} = {to_time_readable}")
+    logger.info(f"📊   Time range:  {to_timestamp - from_timestamp} seconds = {(to_timestamp - from_timestamp)/60:.1f} minutes")
+    
     """Get historical data directly from IBKR"""
     try:
         from app.utils.ib_client import ib_client
         
-        # Check if IBKR is connected
-        if not ib_client.ib.isConnected():
+        # Check IBKR connection status and log it
+        ibkr_connected = ib_client.ib.isConnected()
+        logger.info(f"🔌 IBKR_CONNECTION_STATUS: {ibkr_connected}")
+        
+        if not ibkr_connected:
             logger.error("❌ IBKR is not connected. Cannot fetch historical data.")
+            logger.info(f"📊 RESPONSE_TIMESTAMP_INFO for {symbol} ({resolution}): IBKR not connected - returning error")
             return {
                 "s": "error",
                 "errmsg": "IBKR not connected. Please start TWS/IB Gateway with API enabled (port 7497 for paper trading)."
@@ -290,41 +316,82 @@ async def get_history(
         
         logger.info(f"Fetching history for {symbol} from IBKR: from={from_timestamp}, to={to_timestamp}, days={days_diff:.1f}, duration={duration}, bar_size={bar_size}")
         
-        # Check cache first
+        # Determine cache TTL based on resolution and if this is a real-time request
+        # For real-time requests (small time windows), use much shorter or no cache
+        time_diff = to_timestamp - from_timestamp
+        
+        # Real-time requests have very small time windows (e.g., 10 minutes for 1-min chart)
+        is_realtime_request = time_diff <= 900  # 15 minutes
+        
+        # Set cache TTL based on resolution and request type
+        if is_realtime_request and resolution == '1':
+            cache_ttl = 30  # 30 seconds for 1-minute real-time requests
+        elif is_realtime_request and resolution in ['3', '5']:
+            cache_ttl = 60  # 1 minute for 3-5 minute real-time requests
+        elif is_realtime_request:
+            cache_ttl = 120  # 2 minutes for other real-time requests
+        else:
+            cache_ttl = 300  # 5 minutes for historical data requests
+        
+        logger.info(f"🕒 Cache TTL for {symbol} ({resolution}-min): {cache_ttl}s (realtime: {is_realtime_request})")
+        
+        # Check cache first (only if not a very recent real-time request)
         cache_key = f"{symbol}_{resolution}_{duration}_{bar_size}"
         current_time = time.time()
         
-        if cache_key in _history_cache:
+        if cache_key in _history_cache and not (is_realtime_request and resolution == '1'):
             cached_data, cache_time = _history_cache[cache_key]
-            if current_time - cache_time < CACHE_TTL:
-                logger.info(f"📦 Using cached data for {symbol} (age: {current_time - cache_time:.1f}s)")
+            cache_age = current_time - cache_time
+            if cache_age < cache_ttl:
+                logger.info(f"📦 Using cached data for {symbol} (age: {cache_age:.1f}s, TTL: {cache_ttl}s)")
                 bars = cached_data
+                logger.info(f"📦 CACHE_HIT: Serving {len(cached_data)} cached bars from {datetime.fromtimestamp(cache_time).isoformat()}")
             else:
-                logger.info(f"🔄 Cache expired for {symbol}, fetching fresh data")
+                logger.info(f"🔄 Cache expired for {symbol} (age: {cache_age:.1f}s > TTL: {cache_ttl}s), fetching fresh data")
+                logger.info(f"🔄 IBKR_REQUEST: symbol={symbol}, duration={duration}, barSize={bar_size}, rth=True")
                 bars = await ib_client.history_bars(
                     symbol=symbol,
                     duration=duration,
                     barSize=bar_size,
                     rth=True
                 )
-                _history_cache[cache_key] = (bars, current_time)
+                logger.info(f"🔄 IBKR_RESPONSE: Received {len(bars) if bars else 0} bars")
+                if bars:
+                    _history_cache[cache_key] = (bars, current_time)
         else:
-            logger.info(f"🆕 No cache for {symbol}, fetching from IBKR")
+            logger.info(f"🆕 {'Real-time' if is_realtime_request else 'Fresh'} data fetch for {symbol}")
+            logger.info(f"🆕 IBKR_REQUEST: symbol={symbol}, duration={duration}, barSize={bar_size}, rth=True")
             bars = await ib_client.history_bars(
                 symbol=symbol,
                 duration=duration,
                 barSize=bar_size,
                 rth=True
             )
-            _history_cache[cache_key] = (bars, current_time)
+            logger.info(f"🆕 IBKR_RESPONSE: Received {len(bars) if bars else 0} bars")
+            # Cache with appropriate TTL
+            if bars:
+                _history_cache[cache_key] = (bars, current_time)
+                logger.info(f"🆕 CACHED: Stored {len(bars)} bars with TTL {cache_ttl}s")
         
         if not bars:
             logger.warning(f"No data received from IBKR for {symbol}")
             return {"s": "no_data"}
         
-        # Debug: Log the first bar to see its structure
+        # Debug: Log detailed info about raw IBKR data
         if len(bars) > 0:
-            logger.info(f"First bar: date={bars[0].date}, type={type(bars[0].date)}, open={bars[0].open}")
+            logger.info(f"📊 RAW_IBKR_DATA for {symbol}:")
+            logger.info(f"📊   Total bars from IBKR: {len(bars)}")
+            logger.info(f"📊   First bar: date={bars[0].date}, type={type(bars[0].date)}, close={bars[0].close}")
+            logger.info(f"📊   Last bar:  date={bars[-1].date}, type={type(bars[-1].date)}, close={bars[-1].close}")
+            
+            # Log last few raw bars to see timestamps from IBKR
+            if len(bars) >= 3:
+                logger.info(f"📊 Last 3 raw bars from IBKR:")
+                for i, bar in enumerate(bars[-3:]):
+                    bar_index = len(bars) - 3 + i
+                    logger.info(f"📊   Raw bar {bar_index}: date={bar.date}, close={bar.close}")
+        else:
+            logger.warning(f"📊 NO_RAW_BARS: IBKR returned 0 bars for {symbol}")
         
         # Convert to UDF format
         result = {
@@ -371,6 +438,46 @@ async def get_history(
                 result["v"].append(int(bar.volume) if bar.volume else 0)
         
         logger.info(f"Returning {len(result['t'])} bars for {symbol} from IBKR")
+        
+        # Enhanced logging for ALL requests to debug timestamp issues
+        if len(result["t"]) > 0:
+            first_timestamp = result["t"][0]
+            last_timestamp = result["t"][-1]
+            first_time = datetime.fromtimestamp(first_timestamp)
+            last_time = datetime.fromtimestamp(last_timestamp)
+            current_time = datetime.now()
+            
+            logger.info(f"📊 RESPONSE_TIMESTAMP_INFO for {symbol} ({resolution}):")
+            logger.info(f"📊   Bars returned: {len(result['t'])}")
+            logger.info(f"📊   First bar:    {first_timestamp} = {first_time.isoformat()}")
+            logger.info(f"📊   Last bar:     {last_timestamp} = {last_time.isoformat()}")
+            logger.info(f"📊   Current time: {current_time.isoformat()}")
+            logger.info(f"📊   Time lag:     {(current_time.timestamp() - last_timestamp)/60:.1f} minutes behind current")
+            
+            # Check if we're getting real-time data (last bar should be recent)
+            time_lag_minutes = (current_time.timestamp() - last_timestamp) / 60
+            
+            if resolution == '1':
+                if time_lag_minutes > 2:
+                    logger.warning(f"⚠️  STALE_DATA: Last 1-minute bar is {time_lag_minutes:.1f} minutes old!")
+                else:
+                    logger.info(f"✅ FRESH_DATA: Last 1-minute bar is only {time_lag_minutes:.1f} minutes old")
+            
+            # Log the last few timestamps for all resolutions to see alignment
+            if len(result["t"]) >= 3:
+                logger.info(f"📊 Last 3 bars:")
+                for i, ts in enumerate(result["t"][-3:]):
+                    dt = datetime.fromtimestamp(ts)
+                    bar_index = len(result["t"]) - 3 + i
+                    logger.info(f"📊   Bar {bar_index}: {ts} = {dt.isoformat()} (min:{dt.minute}:{dt.second:02d})")
+            
+            # For debugging: check if we're getting the same last timestamp as previous calls
+            # (This should be handled by a class variable, but for now just log it)
+            logger.info(f"📊 REQUEST vs RESPONSE comparison:")
+            logger.info(f"📊   Requested from: {from_time_readable}")
+            logger.info(f"📊   Requested to:   {to_time_readable}")
+            logger.info(f"📊   Got from:       {first_time.isoformat()}")
+            logger.info(f"📊   Got to:         {last_time.isoformat()}")
         
         if len(result["t"]) == 0:
             return {"s": "no_data"}

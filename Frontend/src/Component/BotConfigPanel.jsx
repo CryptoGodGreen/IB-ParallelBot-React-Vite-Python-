@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import tradingService from '../services/trading/TradingService.js';
+import chartService from '../services/chartService.js';
 import './BotConfigPanel.css';
 
 const BotConfigPanel = ({ 
@@ -27,6 +28,7 @@ const BotConfigPanel = ({
   const [trades, setTrades] = useState([]);
   const [tradingStatus, setTradingStatus] = useState(null);
   const [botStatus, setBotStatus] = useState(null);
+  const [orderStatus, setOrderStatus] = useState(null);
 
   useEffect(() => {
     if (selectedConfig) {
@@ -61,7 +63,24 @@ const BotConfigPanel = ({
   };
 
   const handleSave = () => {
-    onConfigUpdate(config);
+    // Extract only the fields that the backend expects
+    const configData = {
+      name: config.name,
+      symbol: config.symbol,
+      interval: selectedConfig?.interval || '1M', // Use interval from selectedConfig or default to 1M
+      rth: true, // Default to true like in ConfigurationPanel
+      // Keep existing layout_data if available
+      layout_data: selectedConfig?.layout_data || {
+        entry_line: null,
+        exit_line: null,
+        tpsl_settings: null,
+        bot_configuration: null,
+        other_drawings: null
+      }
+    };
+    
+    console.log('💾 BotConfigPanel: Sending config data:', configData);
+    onConfigUpdate(configData);
     // The TradingDashboard will handle saving drawings via the save trigger
   };
 
@@ -112,6 +131,34 @@ const BotConfigPanel = ({
       console.log('🚨 Emergency stop activated');
     } else {
       console.error('❌ Failed to emergency stop');
+    }
+  };
+
+  const handleMarketBuy = async () => {
+    if (!selectedConfig?.id) {
+      console.warn('No configuration selected');
+      setOrderStatus({ type: 'error', message: 'No configuration selected' });
+      return;
+    }
+
+    // Use symbol from selectedConfig first, then fallback to config.symbol, then 'AAPL'
+    const symbol = selectedConfig.symbol || config.symbol || 'AAPL';
+    console.log(`🛒 Placing test market buy order for symbol: ${symbol}`);
+    setOrderStatus({ type: 'pending', message: `Placing market buy order for ${symbol}...` });
+
+    try {
+      const result = await chartService.placeMarketBuyOrder(symbol, 1);
+      setOrderStatus({ 
+        type: 'success', 
+        message: `${symbol} order ${result.message} (Order ID: ${result.order_id})` 
+      });
+      console.log(`✅ Market buy order successful for ${symbol}:`, result);
+    } catch (error) {
+      setOrderStatus({ 
+        type: 'error', 
+        message: `Failed to place ${symbol} order: ${error.message}` 
+      });
+      console.error(`❌ Market buy order failed for ${symbol}:`, error);
     }
   };
 
@@ -287,7 +334,22 @@ const BotConfigPanel = ({
         )}
         <button className="clone-btn" onClick={handleClone}>Clone</button>
         <button className="reject-btn" onClick={handleReject}>Emergency</button>
+        <button className="market-buy-btn" onClick={handleMarketBuy}>
+          Test market buy order
+        </button>
       </div>
+
+      {/* Order Status Display */}
+      {orderStatus && (
+        <div className={`order-status ${orderStatus.type}`}>
+          <span className={`status-indicator ${orderStatus.type}`}>
+            {orderStatus.type === 'pending' && '⏳'}
+            {orderStatus.type === 'success' && '✅'}
+            {orderStatus.type === 'error' && '❌'}
+          </span>
+          {orderStatus.message}
+        </div>
+      )}
 
       <div className="trades-section">
         <div className="trades-header">

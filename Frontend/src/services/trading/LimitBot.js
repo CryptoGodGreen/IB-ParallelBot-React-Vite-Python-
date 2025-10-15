@@ -11,14 +11,20 @@ export class LimitBot {
     this.symbol = config.symbol || 'AAPL';
     this.isActive = false;
     this.isRunning = false;
+    this.chartSide = config.chartSide || 'B'; // 'B' for buy, 'S' for sell
     
-    // Lines management
-    this.entryLine = null;
-    this.exitLines = []; // Array of LimitLine objects, sorted by rank
+    // Lines management - matching old Ruby system
+    this.entryLines = []; // Array of entry LimitLine objects (multiple entry lines supported)
+    this.exitLines = []; // Array of exit LimitLine objects, sorted by rank
     this.allLines = []; // All lines for easy access
+    this.entryLine = null; // Keep for backward compatibility
     
-    // Position management
+    // Position management - matching old Ruby system
     this.totalPosition = 0;
+    this.sharesEntered = 0; // Total shares filled on entry lines
+    this.sharesExited = 0;  // Total shares filled on exit lines
+    this.marketSharesExited = 0; // Emergency market order exits
+    this.openShares = 0;    // Calculated: sharesEntered - (sharesExited + marketSharesExited)
     this.maxPosition = config.maxPosition || 10000;
     this.positionSize = config.positionSize || 1000;
     
@@ -26,12 +32,20 @@ export class LimitBot {
     this.stoppedOut = false;
     this.marketedOut = false;
     this.emergencyBrake = false;
+    this.isStarted = false;
+    this.isStopped = false;
     
     // Safety checks
     this.maxDistanceFromEntry = config.maxDistanceFromEntry || 0.05; // 5%
     this.currentPrice = 0;
     this.entryPrice = 0;
     this.distanceFromEntry = 0;
+    
+    // Market context and price history for trend detection
+    this.priceHistory = [];
+    this.maxPriceHistory = 20; // Keep last 20 prices for trend analysis
+    this.marketContext = 'neutral'; // 'bullish', 'bearish', or 'neutral'
+    this.trendStrength = 0; // -1 to 1, where 1 is very bullish, -1 is very bearish
     
     // Stop-out rules (timeframe-based)
     this.stopOutRules = {
@@ -57,6 +71,18 @@ export class LimitBot {
     this.lastUpdateTime = null;
     this.updateInterval = config.updateInterval || 1000; // 1 second
     
+    // Stop-out tracking - matching old Ruby system
+    this.timeEnteredStopoutZone = null;
+    this.timeEnteredHardStopoutZone = null;
+    this.calculatedSecondsLeftInStopout = -1;
+    this.lastCalculatedPercentFromEntryLine = 0;
+    
+    // Stop-out configuration - matching old Ruby system
+    this.chartRight = config.chartRight || 'C'; // 'C' for call, 'P' for put
+    this.stopOutPercent = config.stopOutPercent || null;
+    this.stopOutTimeLimit = config.stopOutTimeLimit || null; // in minutes
+    this.hardStopOut = config.hardStopOut || null; // percentage threshold
+    
     // Event callbacks
     this.onOrderPlaced = config.onOrderPlaced || (() => {});
     this.onOrderFilled = config.onOrderFilled || (() => {});
@@ -71,6 +97,120 @@ export class LimitBot {
   }
 
   /**
+   * Update price history and detect market context
+   * @param {number} price - Current price
+   */
+  updateMarketContext(price) {
+    // Add current price to history
+    this.priceHistory.push({
+      price: price,
+      timestamp: Date.now()
+    });
+    
+    // Keep only recent prices
+    if (this.priceHistory.length > this.maxPriceHistory) {
+      this.priceHistory.shift();
+    }
+    
+    // Need at least 3 prices to determine trend
+    if (this.priceHistory.length >= 3) {
+      this.detectMarketTrend();
+    }
+  }
+
+  /**
+   * Detect market trend from price history
+   */
+  detectMarketTrend() {
+    if (this.priceHistory.length < 3) return;
+
+    const prices = this.priceHistory.map(p => p.price);
+    const recentPrices = prices.slice(-5); // Last 5 prices
+    const olderPrices = prices.slice(0, -5); // Earlier prices
+    
+    if (recentPrices.length === 5 && olderPrices.length > 0) {
+      const recentAvg = recentPrices.reduce((sum, p) => sum + p, 0) / recentPrices.length;
+      const olderAvg = olderPrices.reduce((sum, p) => sum + p, 0) / olderPrices.length;
+      
+      // Calculate trend strength (-1 to 1)
+      const priceChange = (recentAvg - olderAvg) / olderAvg;
+      this.trendStrength = Math.max(-1, Math.min(1, priceChange * 10)); // Scale factor
+      
+      // Determine market context
+      if (this.trendStrength > 0.1) {
+        this.marketContext = 'bullish';
+      } else if (this.trendStrength < -0.1) {
+        this.marketContext = 'bearish';
+      } else {
+        this.marketContext = 'neutral';
+      }
+      
+      console.log(`LimitBot ${this.id}: Market context: ${this.marketContext}, trend strength: ${this.trendStrength.toFixed(3)}`);
+    }
+  }
+
+  /**
+   * Set lines using simple boolean assignment like old Ruby system
+   * @param {Array} allLinesData - Array of line data from TradingView
+   */
+  assignLinesIntelligently(allLinesData) {
+    if (!allLinesData || allLinesData.length === 0) {
+      console.warn(`LimitBot ${this.id}: No lines to assign`);
+      return;
+    }
+
+    console.log(`LimitBot ${this.id}: Setting ${allLinesData.length} lines using old Ruby logic`);
+
+    // Clear existing lines
+    this.entryLines = [];
+    this.exitLines = [];
+    this.allLines = [];
+    this.entryLine = null;
+
+    // Create LimitLine objects and determine entry/exit based on data structure
+    allLinesData.forEach((lineData, index) => {
+      const line = new LimitLine({
+        id: lineData.id || `line_${index}`,
+        points: lineData.points,
+        orderSize: this.positionSize,
+        maxOrderSize: this.maxPosition,
+        chartSide: this.chartSide
+      });
+
+      // Use the is_entry_line flag from the data (matching old Ruby system's boolean logic)
+      const isEntryLine = lineData.is_entry_line === true;
+      
+      if (isEntryLine) {
+        line.type = 'entry';
+        line.isEntryLine = true;
+        this.entryLines.push(line);
+        this.allLines.push(line);
+        
+        // Set first entry line as primary entryLine for backward compatibility
+        if (!this.entryLine) {
+          this.entryLine = line;
+        }
+        
+        console.log(`LimitBot ${this.id}: Entry line ${this.entryLines.length}: ${line.id}`);
+      } else {
+        line.type = 'exit';
+        line.isEntryLine = false;
+        line.rank = this.exitLines.length + 1;
+        this.exitLines.push(line);
+        this.allLines.push(line);
+        
+        console.log(`LimitBot ${this.id}: Exit line ${line.rank}: ${line.id}`);
+      }
+    });
+
+    // Sort lines by rank (entry lines first, then exit lines)
+    this.entryLines.sort((a, b) => a.rank - b.rank);
+    this.exitLines.sort((a, b) => a.rank - b.rank);
+
+    console.log(`LimitBot ${this.id}: Lines assigned - Entry: ${this.entryLines.length}, Exit: ${this.exitLines.length}`);
+  }
+
+  /**
    * Set the entry line from TradingView data
    * @param {Object} lineData - TradingView line data
    */
@@ -80,7 +220,9 @@ export class LimitBot {
       type: 'entry',
       points: lineData.points,
       orderSize: this.positionSize,
-      maxOrderSize: this.maxPosition
+      maxOrderSize: this.maxPosition,
+      chartSide: this.chartSide,
+      isEntryLine: true
     });
     
     this.allLines.push(this.entryLine);
@@ -99,7 +241,9 @@ export class LimitBot {
       rank: rank,
       points: lineData.points,
       orderSize: 0, // Will be calculated by distribute_target_shares
-      maxOrderSize: this.maxPosition
+      maxOrderSize: this.maxPosition,
+      chartSide: this.chartSide,
+      isEntryLine: false
     });
     
     this.exitLines.push(exitLine);
@@ -112,8 +256,8 @@ export class LimitBot {
   }
 
   /**
-   * Distribute target shares across exit lines
-   * Creates laddered exits with different order sizes
+   * Distribute target shares across exit lines - Exact match to old Ruby logic
+   * This matches the distribute_target_shares method from limit_bot.rb
    */
   distributeTargetShares() {
     if (this.exitLines.length === 0) {
@@ -121,31 +265,121 @@ export class LimitBot {
       return;
     }
 
-    const totalShares = this.positionSize;
-    const numExitLines = this.exitLines.length;
+    // Get exit lines sorted by rank (matching old Ruby system)
+    const tmpLines = [...this.exitLines].sort((a, b) => a.rank - b.rank);
     
-    // Calculate distribution weights (higher rank = smaller portion)
-    const weights = this.exitLines.map((line, index) => {
-      // First exit line gets largest portion, subsequent lines get smaller portions
-      return Math.pow(0.7, index); // 70% of previous line's size
+    // Reset all exit line target shares to 0 (matching old logic)
+    tmpLines.forEach(exitLine => {
+      exitLine.targetShares = 0;
     });
     
-    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    // Reverse order if chart side is 'B' (buy side) - matching old logic line 294
+    if (this.chartSide === 'B') {
+      tmpLines.reverse();
+    }
     
-    // Distribute shares
-    this.exitLines.forEach((line, index) => {
-      const shareRatio = weights[index] / totalWeight;
-      const targetShares = Math.floor(totalShares * shareRatio);
-      
-      line.orderSize = Math.max(line.minOrderSize, targetShares);
-      line.maxOrderSize = Math.min(line.maxOrderSize, targetShares * 2);
-      
-      console.log(`LimitBot ${this.id}: Exit line ${line.rank} allocated ${line.orderSize} shares`);
+    // Get total shares entered (matching old logic line 295)
+    this.updatePositionCounts();
+    const sharesToDistribute = this.sharesEntered;
+    
+    console.log(`LimitBot ${this.id}: Distributing ${sharesToDistribute} shares across ${tmpLines.length} exit lines`);
+    
+    // Distribute shares one by one in round-robin fashion (matching old logic lines 296-305)
+    let sharesLeft = sharesToDistribute;
+    while (sharesLeft > 0) {
+      let distributed = false;
+      tmpLines.forEach(exitLine => {
+        if (sharesLeft > 0) {
+          exitLine.targetShares += 1;
+          sharesLeft -= 1;
+          distributed = true;
+        }
+      });
+      if (!distributed) break; // Prevent infinite loop
+    }
+    
+    // Update order sizes based on target shares
+    tmpLines.forEach(exitLine => {
+      exitLine.orderSize = exitLine.targetShares;
+      console.log(`LimitBot ${this.id}: Exit line ${exitLine.rank} allocated ${exitLine.targetShares} shares`);
     });
+    
+    console.log(`LimitBot ${this.id}: Share distribution complete`);
   }
 
   /**
-   * Start the trading bot
+   * Get entry lines - matching old Ruby logic (lines 61-67)
+   * @returns {Array} Entry lines in correct order based on chart side
+   */
+  getEntryLines() {
+    if (this.chartSide === 'B') {
+      return [...this.entryLines].sort((a, b) => a.rank - b.rank);
+    } else {
+      return [...this.entryLines].sort((a, b) => b.rank - a.rank);
+    }
+  }
+
+  /**
+   * Get exit lines - matching old Ruby logic (line 70)
+   * @returns {Array} Exit lines
+   */
+  getExitLines() {
+    return [...this.exitLines].sort((a, b) => a.rank - b.rank);
+  }
+
+  /**
+   * Get current active entry line - matching old Ruby logic (lines 308-317)
+   * @returns {LimitLine|null} Current active entry line
+   */
+  getCurrentEntryLine() {
+    const entryLines = this.getEntryLines();
+    for (const entryLine of entryLines) {
+      if (entryLine.isActiveLine()) {
+        return entryLine;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Get current active exit line - matching old Ruby logic (lines 319-328)
+   * @returns {LimitLine|null} Current active exit line
+   */
+  getCurrentExitLine() {
+    const exitLines = this.getExitLines();
+    const sortedLines = this.chartSide === 'S' ? exitLines.reverse() : exitLines;
+    
+    for (const exitLine of sortedLines) {
+      if (exitLine.isActiveLine()) {
+        return exitLine;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Update position counts - matching old Ruby logic (lines 102-116)
+   */
+  updatePositionCounts() {
+    // Calculate shares entered from all entry lines
+    this.sharesEntered = this.entryLines.reduce((total, line) => {
+      return total + (line.sharesFilled() || 0);
+    }, 0);
+
+    // Calculate shares exited from all exit lines
+    this.sharesExited = this.exitLines.reduce((total, line) => {
+      return total + (line.sharesFilled() || 0);
+    }, 0);
+
+    // Calculate open shares (matching old Ruby logic line 102-104)
+    this.openShares = this.sharesEntered - (this.sharesExited + this.marketSharesExited);
+    this.totalPosition = this.openShares; // Update total position
+    
+    console.log(`LimitBot ${this.id}: Position - Entered: ${this.sharesEntered}, Exited: ${this.sharesExited}, Market Exited: ${this.marketSharesExited}, Open: ${this.openShares}`);
+  }
+
+  /**
+   * Start the trading bot - matching old Ruby logic structure
    */
   start() {
     if (this.isRunning) {
@@ -153,9 +387,9 @@ export class LimitBot {
       return;
     }
 
-    if (!this.entryLine) {
-      console.error(`LimitBot ${this.id}: Cannot start without entry line`);
-      this.onError('No entry line configured');
+    if (this.entryLines.length === 0) {
+      console.error(`LimitBot ${this.id}: Cannot start without entry lines`);
+      this.onError('No entry lines configured');
       return;
     }
 
@@ -165,13 +399,15 @@ export class LimitBot {
 
     this.isActive = true;
     this.isRunning = true;
+    this.isStarted = true;
+    this.isStopped = false;
     this.startTime = Date.now();
     this.stoppedOut = false;
     this.marketedOut = false;
     this.emergencyBrake = false;
 
-    // Distribute shares across exit lines
-    this.distributeTargetShares();
+    // Set primary entry line for backward compatibility
+    this.entryLine = this.getCurrentEntryLine() || this.entryLines[0];
 
     console.log(`LimitBot ${this.id}: Started trading`);
     this.startUpdateLoop();
@@ -221,35 +457,65 @@ export class LimitBot {
   }
 
   /**
-   * Main update method - evaluates lines and manages orders
+   * Main update method - matches old Ruby tick() method logic (lines 217-289)
    */
   update() {
     if (!this.isActive || this.emergencyBrake) return;
 
     try {
-      const currentTime = Date.now();
-      const currentCandleIndex = this.getCurrentCandleIndex();
+      const tickTimeStart = Date.now();
       
-      // Update current price (this would come from market data feed)
-      this.updateCurrentPrice();
+      // Update position counts first (matching old logic)
+      this.updatePositionCounts();
       
-      // Run safety checks
-      if (!this.runSafetyChecks()) {
+      // Check if bot is completed (matching old logic lines 229-233)
+      if (this.isCompleted()) {
+        this.isStopped = true;
+        console.log(`LimitBot ${this.id}: Bot completed, stopping`);
         return;
       }
       
-      // Update all lines with current candle index
-      this.allLines.forEach(line => {
-        line.updateOrders(currentCandleIndex);
-      });
+      // Update current price from market data (matching old logic line 234)
+      // Only update price if we don't have valid real-time data yet
+      if (this.currentPrice <= 0 || this.currentPrice > 10000) {
+        this.updateCurrentPrice();
+        // If calculated price is still invalid or too high, wait for real-time data
+        if (this.currentPrice <= 0 || this.currentPrice > 10000) {
+          console.warn(`LimitBot ${this.id}: No valid price data available yet (current: ${this.currentPrice}), waiting for real-time updates...`);
+          return; // Exit early but don't error - wait for real-time data
+        }
+      }
       
-      // Manage entry orders
-      this.manageEntryOrders();
+      // Simulate finding new executions (in real system this would come from order updates)
+      const foundNewExecutions = this.checkForNewExecutions();
       
-      // Manage exit orders
-      this.manageExitOrders();
+      if (foundNewExecutions) {
+        console.log(`LimitBot ${this.id}: ================ FOUND NEW EXECUTIONS ================`);
+        console.log(`LimitBot ${this.id}: Redistributing target shares`);
+        this.distributeTargetShares();
+        console.log(`LimitBot ${this.id}: Finished Redistributing target shares`);
+      }
       
-      this.lastUpdateTime = currentTime;
+      // Check stop-out rules if we have open shares (matching old logic lines 260-263)
+      if (this.openShares > 0 && !this.stoppedOut && !this.marketedOut) {
+        this.checkSoftStopOutZone();
+        this.checkHardStop();
+      }
+      
+      // Update orders if not stopped out (matching old logic lines 265-271)
+      if (!this.stoppedOut && !this.marketedOut) {
+        const currentEntryLine = this.getCurrentEntryLine();
+        const currentExitLine = this.getCurrentExitLine();
+        
+        if (currentEntryLine) {
+          currentEntryLine.updateOrder();
+        }
+        if (currentExitLine) {
+          currentExitLine.updateOrder();
+        }
+      }
+      
+      this.lastUpdateTime = Date.now() - tickTimeStart;
       
     } catch (error) {
       console.error(`LimitBot ${this.id}: Update error:`, error);
@@ -258,14 +524,187 @@ export class LimitBot {
   }
 
   /**
+   * Check if bot is completed - matching old Ruby logic (lines 126-130)
+   */
+  isCompleted() {
+    // Check if all entry shares are filled and no open position
+    const entrySharesTarget = this.entryLines.reduce((total, line) => {
+      return total + (line.targetShares || 0);
+    }, 0);
+    
+    return (this.sharesEntered === entrySharesTarget && this.openShares === 0 && 
+            this.entryLines.length > 0 && this.entryLines[this.entryLines.length - 1].targetShares > 0) ||
+           ((this.marketedOut || this.stoppedOut || this.isStopped) && this.openShares === 0);
+  }
+
+  /**
+   * Check for new executions - placeholder for real execution detection
+   */
+  checkForNewExecutions() {
+    // In real implementation, this would check for new order fills
+    // For now, return false
+    return false;
+  }
+
+  /**
+   * Calculate percent from entry line - matching old Ruby logic (lines 350-356)
+   * @param {number} currentPrice - Current market price
+   * @returns {number} Percentage difference from entry line
+   */
+  percentFromEntryLine(currentPrice) {
+    if (!this.entryLines || this.entryLines.length === 0) {
+      return 0;
+    }
+
+    const currentCandleIndex = this.getCurrentCandleIndex();
+    const entryPrice = this.entryLines[0].calculateCurrentPrice(currentCandleIndex);
+    
+    let val = 0;
+    
+    if (this.chartRight === 'C') {
+      // Call: ((entry_price - current_price) / entry_price) * 100
+      val = 100 * ((entryPrice - currentPrice) / entryPrice);
+    } else {
+      // Put: ((current_price - entry_price) / entry_price) * 100
+      val = 100 * ((currentPrice - entryPrice) / entryPrice);
+    }
+    
+    this.lastCalculatedPercentFromEntryLine = val;
+    return val;
+  }
+
+  /**
+   * Check soft stop-out zone - matching old Ruby logic (lines 495-520)
+   * @param {number} currentPrice - Current market price
+   */
+  checkSoftStopOutZone() {
+    const currentPrice = this.currentPrice;
+    
+    if (!this.stopOutPercent || !this.stopOutTimeLimit) {
+      return;
+    }
+
+    const percentFromEntry = this.percentFromEntryLine(currentPrice);
+    
+    if (percentFromEntry > this.stopOutPercent) {
+      if (!this.timeEnteredStopoutZone) {
+        console.log(`LimitBot ${this.id}: Entering stopout zone`);
+        this.timeEnteredStopoutZone = Date.now();
+        this.calculatedSecondsLeftInStopout = this.stopOutTimeLimit * 60;
+      } else {
+        const timeInStopoutZone = (Date.now() - this.timeEnteredStopoutZone) / (1000 * 60); // minutes
+        this.calculatedSecondsLeftInStopout = (this.stopOutTimeLimit * 60) - 
+          ((Date.now() - this.timeEnteredStopoutZone) / 1000); // seconds
+        
+        if (timeInStopoutZone > this.stopOutTimeLimit) {
+          console.log(`LimitBot ${this.id}: Stopped out @ ${currentPrice}`);
+          this.stoppedOut = true;
+          this.zeroOut();
+        }
+      }
+    } else {
+      this.timeEnteredStopoutZone = null;
+      this.calculatedSecondsLeftInStopout = -1;
+    }
+  }
+
+  /**
+   * Check hard stop - matching old Ruby logic (lines 473-493)
+   * @param {number} currentPrice - Current market price
+   */
+  checkHardStop() {
+    const currentPrice = this.currentPrice;
+    
+    if (!this.hardStopOut) {
+      return;
+    }
+
+    const percentFromEntry = this.percentFromEntryLine(currentPrice);
+    
+    if (percentFromEntry > this.hardStopOut) {
+      if (!this.timeEnteredHardStopoutZone || 
+          (this.timeEnteredHardStopoutZone + 30000) > Date.now()) { // 30 seconds
+        
+        if (!this.timeEnteredHardStopoutZone) {
+          console.log(`LimitBot ${this.id}: Entering hard stopout zone`);
+          console.log(`LimitBot ${this.id}: ${percentFromEntry.toFixed(2)}% > ${this.hardStopOut}%`);
+          this.timeEnteredHardStopoutZone = Date.now();
+        }
+        // DO NOTHING AND WAIT (matching old logic line 482)
+      } else {
+        console.log(`LimitBot ${this.id}: HARD Stop out @ ${currentPrice}`);
+        this.stoppedOut = true;
+        this.zeroOut();
+      }
+    } else {
+      this.timeEnteredHardStopoutZone = null;
+    }
+  }
+
+  /**
+   * Zero out position with market order - matching old Ruby logic (lines 180-207)
+   */
+  zeroOut() {
+    // Cancel all orders first
+    this.cancelAllOrders();
+    
+    const lotSizePortion = Math.max(0, this.openShares);
+    this.marketedOut = true;
+    
+    // Determine side for market order (matching old logic line 189)
+    const side = this.chartRight === 'C' ? 'S' : 'B'; // Opposite of the chart right
+    
+    console.log(`LimitBot ${this.id}: Zeroing out with market ${side} order for ${lotSizePortion} shares`);
+    
+    // In real implementation, this would place a market order
+    // For now, just log the action
+    console.log(`LimitBot ${this.id}: Market ${side} order would be placed for ${this.symbol} - ${lotSizePortion} shares`);
+    
+    // Update market shares exited
+    this.marketSharesExited += lotSizePortion;
+    this.updatePositionCounts();
+  }
+
+  /**
+   * Cancel all orders - matching old Ruby logic (lines 73-77)
+   */
+  cancelAllOrders() {
+    this.allLines.forEach(line => {
+      line.cancelOrder();
+    });
+    console.log(`LimitBot ${this.id}: All orders cancelled`);
+  }
+
+  /**
    * Update current market price (placeholder - would integrate with market data)
    */
   updateCurrentPrice() {
     // This would integrate with real market data
-    // For now, use entry line price as reference
-    if (this.entryLine) {
-      const currentCandleIndex = this.getCurrentCandleIndex();
-      this.currentPrice = this.entryLine.calculateCurrentPrice(currentCandleIndex);
+    // For now, use entry line price as reference, but don't override real-time price data
+    if (this.entryLine && this.entryLine.points && this.entryLine.points.length >= 2 && this.currentPrice <= 0) {
+      try {
+        const currentCandleIndex = this.getCurrentCandleIndex();
+        
+        // Debug the candle index calculation
+        console.log(`LimitBot ${this.id}: Current candle index: ${currentCandleIndex}, slope: ${this.entryLine.slope?.toFixed(6)}, intercept: ${this.entryLine.intercept?.toFixed(6)}`);
+        
+        const calculatedPrice = this.entryLine.calculateCurrentPrice(currentCandleIndex);
+        
+        // Validate the calculated price and add reasonable bounds
+        if (calculatedPrice && calculatedPrice > 0 && !isNaN(calculatedPrice) && calculatedPrice < 10000 && calculatedPrice > 1) {
+          this.currentPrice = calculatedPrice;
+          console.log(`LimitBot ${this.id}: Calculated price from entry line: ${calculatedPrice.toFixed(4)}`);
+        } else {
+          console.warn(`LimitBot ${this.id}: Invalid calculated price: ${calculatedPrice} (candleIndex: ${currentCandleIndex}), waiting for real-time data`);
+          this.currentPrice = 0;
+        }
+      } catch (error) {
+        console.warn(`LimitBot ${this.id}: Error calculating price from entry line:`, error);
+        this.currentPrice = 0;
+      }
+    } else {
+      console.warn(`LimitBot ${this.id}: Entry line not properly initialized or already has price data, waiting for real-time data`);
+      // Don't override existing price data
     }
   }
 
@@ -361,43 +800,180 @@ export class LimitBot {
   }
 
   /**
-   * Manage entry orders
+   * Manage entry orders with direction-aware logic
    */
   manageEntryOrders() {
-    if (!this.entryLine || this.totalPosition >= this.maxPosition) return;
+    if (!this.entryLine) {
+      console.log(`LimitBot ${this.id}: No entry line configured`);
+      return;
+    }
     
-    const entryPrice = this.entryLine.currentPrice;
-    const priceDiff = Math.abs(this.currentPrice - entryPrice);
-    const priceDiffPercent = (priceDiff / entryPrice) * 100;
+    if (this.totalPosition >= this.maxPosition) {
+      console.log(`LimitBot ${this.id}: Position limit reached (${this.totalPosition}/${this.maxPosition})`);
+      return;
+    }
     
-    // Place entry order if price is close to entry line
-    if (priceDiffPercent < 0.1 && this.entryLine.pendingOrders.length === 0) {
+    // Ensure entry line has current price calculated
+    const currentCandleIndex = this.getCurrentCandleIndex();
+    const entryPrice = this.entryLine.calculateCurrentPrice(currentCandleIndex);
+    const priceDiff = this.currentPrice - entryPrice;
+    const priceDiffPercent = Math.abs(priceDiff / entryPrice) * 100;
+    
+    console.log(`LimitBot ${this.id}: Entry order check - Current: ${this.currentPrice.toFixed(4)}, Entry: ${entryPrice.toFixed(4)}, Diff: ${priceDiffPercent.toFixed(3)}%, Direction: ${this.entryLine.direction}, Market: ${this.marketContext}`);
+    
+    // Direction-aware entry logic
+    let shouldPlaceEntry = false;
+    let entryReason = '';
+    
+    if (priceDiffPercent < 0.1) {
+      // Price is very close to entry line
+      if (this.entryLine.direction === 'horizontal') {
+        shouldPlaceEntry = true;
+        entryReason = 'price at horizontal entry level';
+      } else if (this.entryLine.direction === 'upward' && this.marketContext !== 'bearish') {
+        // Upward entry line in bullish/neutral market
+        shouldPlaceEntry = true;
+        entryReason = 'price touching upward entry in favorable market';
+      } else if (this.entryLine.direction === 'downward' && this.marketContext !== 'bullish') {
+        // Downward entry line in bearish/neutral market (dip buying)
+        shouldPlaceEntry = true;
+        entryReason = 'price touching downward entry for dip buying';
+      } else {
+        console.log(`LimitBot ${this.id}: Entry conditions not met - ${this.entryLine.direction} line in ${this.marketContext} market`);
+      }
+    }
+    
+    // Risk management check for direction-aware entries
+    if (shouldPlaceEntry) {
+      const riskCheck = this.checkEntryRisk();
+      if (!riskCheck.passed) {
+        console.log(`LimitBot ${this.id}: Entry blocked by risk management: ${riskCheck.reason}`);
+        shouldPlaceEntry = false;
+      }
+    }
+    
+    if (shouldPlaceEntry && this.entryLine.pendingOrders.length === 0) {
+      console.log(`LimitBot ${this.id}: 🎯 ${entryReason.toUpperCase()}! Placing order...`);
       const order = this.entryLine.placeOrder(this.positionSize, 'buy');
       if (order) {
         this.onOrderPlaced(order);
+        console.log(`LimitBot ${this.id}: ✅ Entry order placed:`, order);
       }
+    } else if (priceDiffPercent >= 0.1) {
+      console.log(`LimitBot ${this.id}: Price too far from entry line (${priceDiffPercent.toFixed(3)}%)`);
+    } else if (this.entryLine.pendingOrders.length > 0) {
+      console.log(`LimitBot ${this.id}: Entry order already pending`);
     }
   }
 
   /**
-   * Manage exit orders
+   * Check entry risk based on line direction and market context
+   */
+  checkEntryRisk() {
+    const riskThreshold = 0.02; // 2% risk threshold
+    
+    // Higher risk for counter-trend entries
+    if (this.entryLine.direction === 'upward' && this.marketContext === 'bearish') {
+      return { passed: false, reason: 'upward entry in bearish market (high risk)' };
+    }
+    
+    if (this.entryLine.direction === 'downward' && this.marketContext === 'bullish') {
+      return { passed: false, reason: 'downward entry in bullish market (high risk)' };
+    }
+    
+    // Check distance from current price to entry
+    const currentCandleIndex = this.getCurrentCandleIndex();
+    const entryPrice = this.entryLine.calculateCurrentPrice(currentCandleIndex);
+    const priceDiff = Math.abs(this.currentPrice - entryPrice) / this.currentPrice;
+    
+    if (priceDiff > riskThreshold) {
+      return { passed: false, reason: `entry price too far (${(priceDiff * 100).toFixed(2)}%)` };
+    }
+    
+    return { passed: true };
+  }
+
+  /**
+   * Manage exit orders with direction-aware logic
    */
   manageExitOrders() {
     if (this.exitLines.length === 0) return;
     
     this.exitLines.forEach(exitLine => {
       const exitPrice = exitLine.currentPrice;
-      const priceDiff = Math.abs(this.currentPrice - exitPrice);
-      const priceDiffPercent = (priceDiff / exitPrice) * 100;
+      const priceDiff = this.currentPrice - exitPrice;
+      const priceDiffPercent = Math.abs(priceDiff / exitPrice) * 100;
       
-      // Place exit order if price is close to exit line
-      if (priceDiffPercent < 0.1 && exitLine.pendingOrders.length === 0) {
-        const order = exitLine.placeOrder(exitLine.orderSize, 'sell');
-        if (order) {
-          this.onOrderPlaced(order);
+      // Only place exit orders if we have a position to sell
+      if (this.totalPosition <= 0) {
+        return;
+      }
+      
+      // Direction-aware exit logic
+      let shouldPlaceExit = false;
+      let exitReason = '';
+      
+      if (priceDiffPercent < 0.1) {
+        if (exitLine.direction === 'horizontal') {
+          shouldPlaceExit = true;
+          exitReason = 'price at horizontal exit level';
+        } else if (exitLine.direction === 'upward') {
+          // Upward exit line - profit taking as price rises
+          if (priceDiff >= 0) { // Current price >= exit price
+            shouldPlaceExit = true;
+            exitReason = 'price reached upward profit target';
+          }
+        } else if (exitLine.direction === 'downward') {
+          // Downward exit line - stop loss as price falls
+          if (priceDiff <= 0) { // Current price <= exit price
+            shouldPlaceExit = true;
+            exitReason = 'price hit downward stop loss';
+          }
         }
       }
+      
+      // Additional risk management for exits
+      if (shouldPlaceExit && this.checkExitRisk(exitLine)) {
+        if (exitLine.pendingOrders.length === 0) {
+          console.log(`LimitBot ${this.id}: 🎯 ${exitReason.toUpperCase()}! Placing exit order...`);
+          const order = exitLine.placeOrder(exitLine.orderSize, 'sell');
+          if (order) {
+            this.onOrderPlaced(order);
+            console.log(`LimitBot ${this.id}: ✅ Exit order placed on ${exitLine.direction} line:`, order);
+          }
+        }
+      } else if (priceDiffPercent >= 0.1) {
+        console.log(`LimitBot ${this.id}: Price too far from ${exitLine.direction} exit line (${priceDiffPercent.toFixed(3)}%)`);
+      }
     });
+  }
+
+  /**
+   * Check exit risk based on line direction and market context
+   * @param {LimitLine} exitLine - The exit line to check
+   */
+  checkExitRisk(exitLine) {
+    // Always allow stop-loss exits (downward lines)
+    if (exitLine.direction === 'downward') {
+      return true;
+    }
+    
+    // For profit-taking exits (upward lines), consider market context
+    if (exitLine.direction === 'upward') {
+      // Be more aggressive with profit-taking in bearish markets
+      if (this.marketContext === 'bearish') {
+        return true;
+      }
+      // Still allow in bullish markets but might be more conservative
+      return true;
+    }
+    
+    // Horizontal lines are always OK
+    if (exitLine.direction === 'horizontal') {
+      return true;
+    }
+    
+    return true; // Default to allowing exit
   }
 
   /**
@@ -438,6 +1014,8 @@ export class LimitBot {
       currentPrice: this.currentPrice,
       entryPrice: this.entryPrice,
       distanceFromEntry: this.distanceFromEntry,
+      marketContext: this.marketContext,
+      trendStrength: this.trendStrength,
       entryLine: this.entryLine?.getStatus(),
       exitLines: this.exitLines.map(line => line.getStatus()),
       startTime: this.startTime,

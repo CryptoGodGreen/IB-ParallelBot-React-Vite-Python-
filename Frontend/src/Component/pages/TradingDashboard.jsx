@@ -101,16 +101,27 @@ const TradingDashboard = () => {
 
   const handleConfigSave = async (configData) => {
     console.log('💾 BotConfigPanel Save button clicked');
-    if (selectedConfig) {
+    console.log('💾 selectedConfig:', selectedConfig);
+    console.log('💾 configData:', configData);
+    
+    if (selectedConfig && selectedConfig.id) {
       console.log('💾 Updating configuration:', selectedConfig.id);
-      await updateConfiguration(selectedConfig.id, configData);
+      const updatedConfig = await updateConfiguration(selectedConfig.id, configData);
+      // Update selectedConfig with the response
+      setSelectedConfig(updatedConfig);
       // Trigger drawing save (which will reload the config with fresh data)
       console.log('💾 Triggering drawing save...');
       setSaveTrigger(prev => prev + 1);
     } else {
-      console.log('💾 Creating new configuration');
-      const newConfig = await saveConfiguration(configData);
-      setSelectedConfig(newConfig);
+      console.log('💾 Creating new configuration (selectedConfig is null or has no id)');
+      console.log('💾 selectedConfig value:', selectedConfig);
+      try {
+        const newConfig = await saveConfiguration(configData);
+        setSelectedConfig(newConfig);
+      } catch (error) {
+        console.error('💾 Error creating new configuration:', error);
+        throw error; // Re-throw to let the UI handle the error
+      }
     }
   };
 

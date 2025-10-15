@@ -2,7 +2,7 @@ import logging.config
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import health_router, cache_router, users_router, charts_router
+from app.routes import health_router, cache_router, users_router, charts_router, orders_router
 from app.api.udf import router as udf_router
 from app.db.models import Base
 from app.models.market_data import Base as MarketDataBase
@@ -55,6 +55,7 @@ app.include_router(health_router)
 app.include_router(cache_router)
 app.include_router(users_router)
 app.include_router(charts_router)
+app.include_router(orders_router)
 app.include_router(udf_router)
 
 @app.on_event("startup")
