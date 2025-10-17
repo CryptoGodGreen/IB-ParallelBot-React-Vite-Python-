@@ -38,6 +38,7 @@ class UserChart(Base):
     symbol = Column(String, index=True, nullable=False)
     interval = Column(String, nullable=False)
     rth = Column(Boolean, default=True)
+    trade_amount = Column(Numeric(10, 2), default=1000)  # Trade amount in USD
     
     # layout_data will store line coordinates, TP/SL settings, etc.
     layout_data = Column(JSON, nullable=False)

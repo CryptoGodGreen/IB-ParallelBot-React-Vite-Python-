@@ -67,6 +67,7 @@ class ChartDataBase(BaseModel):
     symbol: str
     interval: str
     rth: bool = True
+    trade_amount: Optional[float] = 1000  # Trade amount in USD
     layout_data: LayoutData # Using the new structured model
 
 class ChartCreate(ChartDataBase):
@@ -79,6 +80,7 @@ class ChartUpdate(BaseModel):
     symbol: Optional[str] = None
     interval: Optional[str] = None
     rth: Optional[bool] = None
+    trade_amount: Optional[float] = None  # Trade amount in USD
     layout_data: Optional[LayoutData] = None
 
 class ChartResponse(ChartDataBase):

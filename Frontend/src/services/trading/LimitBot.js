@@ -191,7 +191,7 @@ export class LimitBot {
           this.entryLine = line;
         }
         
-        console.log(`LimitBot ${this.id}: Entry line ${this.entryLines.length}: ${line.id}`);
+        console.log(`LimitBot ${this.id}: Entry line ${this.entryLines.length}: ${line.id} (price: ${line.points?.[0]?.price?.toFixed(2) || 'unknown'})`);
       } else {
         line.type = 'exit';
         line.isEntryLine = false;
@@ -199,7 +199,7 @@ export class LimitBot {
         this.exitLines.push(line);
         this.allLines.push(line);
         
-        console.log(`LimitBot ${this.id}: Exit line ${line.rank}: ${line.id}`);
+        console.log(`LimitBot ${this.id}: Exit line ${line.rank}: ${line.id} (price: ${line.points?.[0]?.price?.toFixed(2) || 'unknown'})`);
       }
     });
 
@@ -260,6 +260,13 @@ export class LimitBot {
    * This matches the distribute_target_shares method from limit_bot.rb
    */
   distributeTargetShares() {
+    // Set target shares for entry lines first
+    this.entryLines.forEach(entryLine => {
+      entryLine.targetShares = this.positionSize; // Each entry line can take the full position
+      entryLine.orderSize = this.positionSize;
+      console.log(`💰 LimitBot ${this.id}: Entry line allocated $${entryLine.targetShares} (trade amount from config)`);
+    });
+
     if (this.exitLines.length === 0) {
       console.warn(`LimitBot ${this.id}: No exit lines to distribute shares`);
       return;
@@ -282,7 +289,7 @@ export class LimitBot {
     this.updatePositionCounts();
     const sharesToDistribute = this.sharesEntered;
     
-    console.log(`LimitBot ${this.id}: Distributing ${sharesToDistribute} shares across ${tmpLines.length} exit lines`);
+    console.log(`💰 LimitBot ${this.id}: Distributing $${sharesToDistribute} across ${tmpLines.length} exit lines`);
     
     // Distribute shares one by one in round-robin fashion (matching old logic lines 296-305)
     let sharesLeft = sharesToDistribute;
@@ -405,11 +412,16 @@ export class LimitBot {
     this.stoppedOut = false;
     this.marketedOut = false;
     this.emergencyBrake = false;
+    this.enableAlerts = true; // Enable browser alerts for price crossings
+    this.crossingEvents = []; // Initialize crossing events array
 
     // Set primary entry line for backward compatibility
     this.entryLine = this.getCurrentEntryLine() || this.entryLines[0];
 
-    console.log(`LimitBot ${this.id}: Started trading`);
+    // Distribute target shares to entry and exit lines
+    this.distributeTargetShares();
+
+    console.log(`🚀 LimitBot ${this.id}: Started trading - isRunning: ${this.isRunning}, currentPrice: ${this.currentPrice}`);
     this.startUpdateLoop();
   }
 
@@ -475,15 +487,10 @@ export class LimitBot {
         return;
       }
       
-      // Update current price from market data (matching old logic line 234)
-      // Only update price if we don't have valid real-time data yet
+      // Check if we have valid real-time price data
       if (this.currentPrice <= 0 || this.currentPrice > 10000) {
-        this.updateCurrentPrice();
-        // If calculated price is still invalid or too high, wait for real-time data
-        if (this.currentPrice <= 0 || this.currentPrice > 10000) {
-          console.warn(`LimitBot ${this.id}: No valid price data available yet (current: ${this.currentPrice}), waiting for real-time updates...`);
-          return; // Exit early but don't error - wait for real-time data
-        }
+        console.warn(`LimitBot ${this.id}: No valid price data available yet (current: ${this.currentPrice}), waiting for real-time updates...`);
+        return; // Exit early but don't error - wait for real-time data
       }
       
       // Simulate finding new executions (in real system this would come from order updates)
@@ -502,6 +509,9 @@ export class LimitBot {
         this.checkHardStop();
       }
       
+      // Check for price crossings with configuration lines
+      this.checkPriceCrossings();
+
       // Update orders if not stopped out (matching old logic lines 265-271)
       if (!this.stoppedOut && !this.marketedOut) {
         const currentEntryLine = this.getCurrentEntryLine();
@@ -713,9 +723,10 @@ export class LimitBot {
    * @returns {number} Current candle index
    */
   getCurrentCandleIndex() {
-    const now = Date.now();
-    const marketOpen = new Date().setHours(9, 30, 0, 0); // 9:30 AM EST
-    return Math.floor((now - marketOpen) / 60000); // 1-minute candles
+    // Current time is always index 0 for our relative calculation
+    // Historical points will have negative indices (minutes ago)
+    // Future projections will have positive indices (minutes ahead)
+    return 0;
   }
 
   /**
@@ -997,6 +1008,49 @@ export class LimitBot {
   }
 
   /**
+   * Check for price crossings with configuration lines
+   * This method detects when the current price crosses any of the drawn lines
+   */
+  checkPriceCrossings() {
+    console.log(`🔍 LimitBot ${this.id}: checkPriceCrossings called - currentPrice: ${this.currentPrice}, isRunning: ${this.isRunning}, allLines: ${this.allLines.length}`);
+    
+    if (this.currentPrice <= 0) {
+      console.log(`❌ LimitBot ${this.id}: No valid price data (currentPrice: ${this.currentPrice})`);
+      return; // No valid price data
+    }
+
+    // Simple logging: current price and each line's price
+    console.log(`✅ Current Price: $${this.currentPrice.toFixed(2)} (Bot ${this.id}, Running: ${this.isRunning})`);
+    
+    this.allLines.forEach((line, index) => {
+      if (line.points && line.points.length >= 2) {
+        const linePrice = this.calculateLinePriceAtCurrentTime(line);
+        const lineType = line.isEntryLine ? 'ENTRY' : 'EXIT';
+        console.log(`📊 Line ${index + 1} (${lineType}): $${linePrice.toFixed(2)}`);
+      }
+    });
+  }
+
+  /**
+   * Calculate the price of a line at the current time
+   * @param {LimitLine} line - The line to calculate price for
+   * @returns {number} The calculated line price
+   */
+  calculateLinePriceAtCurrentTime(line) {
+    if (!line.points || line.points.length < 2) {
+      return 0;
+    }
+
+    try {
+      const currentCandleIndex = this.getCurrentCandleIndex();
+      return line.calculateCurrentPrice(currentCandleIndex);
+    } catch (error) {
+      console.warn(`LimitBot ${this.id}: Error calculating line price for ${line.id}:`, error);
+      return 0;
+    }
+  }
+
+  /**
    * Get bot status
    * @returns {Object} Bot status
    */
@@ -1019,7 +1073,9 @@ export class LimitBot {
       entryLine: this.entryLine?.getStatus(),
       exitLines: this.exitLines.map(line => line.getStatus()),
       startTime: this.startTime,
-      lastUpdateTime: this.lastUpdateTime
+      lastUpdateTime: this.lastUpdateTime,
+      enableAlerts: this.enableAlerts,
+      crossingEvents: this.crossingEvents || []
     };
   }
 
@@ -1030,6 +1086,52 @@ export class LimitBot {
   updateConfig(newConfig) {
     Object.assign(this, newConfig);
     console.log(`LimitBot ${this.id}: Configuration updated`);
+  }
+
+  /**
+   * Enable or disable browser alerts for price crossings
+   * @param {boolean} enabled - Whether to enable alerts
+   */
+  setAlertsEnabled(enabled) {
+    this.enableAlerts = enabled;
+    console.log(`LimitBot ${this.id}: Alerts ${enabled ? 'enabled' : 'disabled'}`);
+  }
+
+  /**
+   * Get recent crossing events
+   * @returns {Array} Array of crossing events
+   */
+  getCrossingEvents() {
+    return this.crossingEvents || [];
+  }
+
+  /**
+   * Clear crossing events history
+   */
+  clearCrossingEvents() {
+    this.crossingEvents = [];
+    console.log(`LimitBot ${this.id}: Crossing events cleared`);
+  }
+
+  /**
+   * Test price crossing detection (for debugging)
+   */
+  testPriceCrossing() {
+    console.log(`LimitBot ${this.id}: Testing price crossing detection...`);
+    console.log(`Current price: ${this.currentPrice}`);
+    console.log(`All lines: ${this.allLines.length}`);
+    
+    this.allLines.forEach((line, index) => {
+      const linePrice = this.calculateLinePriceAtCurrentTime(line);
+      console.log(`Line ${index + 1} (${line.id}): ${linePrice.toFixed(4)} - Type: ${line.isEntryLine ? 'ENTRY' : 'EXIT'}`);
+      
+      // Show detailed calculation info
+      if (line.points && line.points.length >= 2) {
+        console.log(`  Points: [${line.points[0].time}, ${line.points[0].price}] to [${line.points[1].time}, ${line.points[1].price}]`);
+        console.log(`  Slope: ${line.slope.toFixed(6)}, Intercept: ${line.intercept.toFixed(4)}`);
+        console.log(`  Current candle index: ${this.getCurrentCandleIndex()}`);
+      }
+    });
   }
 }
 

@@ -25,6 +25,8 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
 
   // Save drawings to backend using TradingView's proper API
   const saveDrawingsToConfig = async (configId, configData) => {
+    console.log('🚀 saveDrawingsToConfig called with:', { configId, configDataKeys: Object.keys(configData) });
+    
     try {
       if (!widgetRef.current) {
         console.warn('⚠️ Widget not ready, cannot save drawings');
@@ -56,11 +58,97 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
         configId: configId
       };
       
+      console.log('🔍 Initial layoutData:', layoutData);
+      
       try {
         console.log('💾 Attempting to capture TradingView drawings...');
         
-        // Method 1: Try TradingView's built-in save method (like the working example)
-        if (widgetRef.current && typeof widgetRef.current.save === 'function') {
+        // Method 1: Get only the shapes that are currently visible on the chart
+        if (widgetRef.current && widgetRef.current.chart) {
+          const chart = widgetRef.current.chart();
+          
+          // Just capture the current shapes without clearing them
+          
+          // First, get all currently visible shapes
+          if (typeof chart.getAllShapes === 'function') {
+            console.log('💾 Getting currently visible shapes...');
+            try {
+              const allShapes = chart.getAllShapes();
+              console.log('💾 Total shapes on chart:', allShapes.length);
+              console.log('💾 Shape IDs:', allShapes.map(s => s.id || 'no-id'));
+              
+              // DEBUG: Check if TradingView is using localStorage
+              console.log('🔍 Checking TradingView localStorage...');
+              const tradingViewKeys = Object.keys(localStorage).filter(key => 
+                key.includes('tradingview') || key.includes('tv') || key.includes('chart')
+              );
+              console.log('🔍 TradingView localStorage keys:', tradingViewKeys);
+              
+              // Check if any of these keys contain shape data
+              tradingViewKeys.forEach(key => {
+                try {
+                  const value = localStorage.getItem(key);
+                  if (value && (value.includes('shapes') || value.includes('drawings') || value.includes('LineTool'))) {
+                    console.log('🔍 Found shape data in localStorage key:', key, 'Length:', value.length);
+                  }
+                } catch (e) {
+                  // Ignore errors
+                }
+              });
+              
+              // DEBUG: Let's see what's actually in the shapes
+              console.log('🔍 DEBUG: All shapes details:', allShapes.map(shape => ({
+                id: shape.id,
+                type: shape.type,
+                name: shape.name,
+                visible: shape.visible,
+                isHidden: shape.isHidden,
+                points: shape.points ? shape.points.length : 'no-points'
+              })));
+              
+              // Try to filter only visible shapes
+              const visibleShapes = allShapes.filter(shape => {
+                // Check if shape is actually visible
+                return shape && shape.id && !shape.isHidden && shape.visible !== false;
+              });
+              
+              console.log('💾 All shapes count:', allShapes.length);
+              console.log('💾 Visible shapes count:', visibleShapes.length);
+              console.log('💾 Visible shape IDs:', visibleShapes.map(s => s.id || 'no-id'));
+              
+              // Check for accumulation - if we have more than 3 shapes, something is wrong
+              if (allShapes.length > 3) {
+                console.log('⚠️ WARNING: Detected', allShapes.length, 'shapes - possible accumulation detected!');
+                console.log('⚠️ This suggests the clearing in loadDrawingsForConfig is not working properly');
+                console.log('⚠️ Consider refreshing the page to reset TradingView state');
+              }
+              
+              // Use visible shapes, or fallback to last 3 if still too many
+              const shapesToUse = visibleShapes.length <= 3 ? visibleShapes : visibleShapes.slice(-3);
+              
+              // Always use active_shapes, even if empty (to prevent fallback to old method)
+              layoutData.other_drawings = {
+                active_shapes: shapesToUse,
+                capture_method: 'chart.getAllShapes',
+                timestamp: Date.now()
+              };
+              console.log('💾 Captured shapes via chart.getAllShapes() - count:', shapesToUse.length);
+              console.log('🔍 layoutData after active_shapes capture:', {
+                other_drawings: layoutData.other_drawings ? Object.keys(layoutData.other_drawings) : 'null',
+                active_shapes_count: layoutData.other_drawings?.active_shapes?.length || 0
+              });
+            } catch (error) {
+              console.error('❌ Error calling chart.getAllShapes():', error);
+              console.log('⚠️ Falling back to widget.save() method due to getAllShapes error');
+            }
+          } else {
+            console.log('⚠️ chart.getAllShapes() method not available');
+            console.log('⚠️ Available chart methods:', Object.getOwnPropertyNames(chart).filter(name => typeof chart[name] === 'function'));
+          }
+        }
+        
+        // Method 2: Try TradingView's built-in save method (ONLY if getAllShapes failed)
+        if (!layoutData.other_drawings.active_shapes && widgetRef.current && typeof widgetRef.current.save === 'function') {
           console.log('💾 Trying widget.save() method...');
           const tradingViewData = widgetRef.current.save();
           
@@ -84,6 +172,13 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                 const trendLines = sources.filter(s => s.type === 'LineToolTrendLine');
                 console.log('💾 Number of trend lines found:', trendLines.length);
                 console.log('💾 All source types:', sources.map(s => ({ type: s.type, name: s.name })));
+                console.log('💾 Trend line IDs:', trendLines.map(t => t.id || 'no-id'));
+                console.log('💾 Full trend line data:', trendLines.map(t => ({
+                  id: t.id,
+                  type: t.type,
+                  name: t.name,
+                  state: t.state ? Object.keys(t.state) : 'no-state'
+                })));
                 
                 if (trendLines.length > 0) {
                   console.log('💾 Trend line details:', trendLines);
@@ -439,8 +534,26 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
         return;
       }
       
+      // Simple approach: Just send the current drawings to backend, let backend replace everything
+      console.log('💾 Sending current drawings to backend for replacement');
+      console.log('💾 Layout data:', {
+        entry_line: layoutData.entry_line ? 'present' : 'null',
+        exit_line: layoutData.exit_line ? 'present' : 'null',
+        other_drawings: layoutData.other_drawings ? Object.keys(layoutData.other_drawings) : 'null',
+        active_shapes_count: layoutData.other_drawings?.active_shapes?.length || 0
+      });
+      
       // Call parent component's save function and get the updated config back
       if (onSaveDrawings && layoutData) {
+        console.log('📤 Sending layout_data to backend:', {
+          configId,
+          layoutDataKeys: Object.keys(layoutData),
+          otherDrawingsKeys: layoutData.other_drawings ? Object.keys(layoutData.other_drawings) : 'none',
+          activeShapes: layoutData.other_drawings?.active_shapes?.length || 0,
+          tradingviewDrawings: layoutData.other_drawings?.tradingview_drawings?.length || 0,
+          captureMethod: layoutData.other_drawings?.capture_method || 'unknown'
+        });
+        
         const updatedConfig = await onSaveDrawings(configId, { ...configData, layout_data: layoutData });
         console.log('✅ Layout data saved successfully');
         return updatedConfig; // Return the fresh config from PUT response
@@ -512,14 +625,61 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
             
             // Clear existing drawings first
             try {
+              // Clear all existing shapes first - be more aggressive
               if (widgetRef.current && widgetRef.current.chart) {
                 const chart = widgetRef.current.chart();
+                
+                // Get all current shapes before clearing
+                const currentShapes = chart.getAllShapes ? chart.getAllShapes() : [];
+                console.log('🧹 Found', currentShapes.length, 'shapes to clear');
+                console.log('🧹 Current shape IDs:', currentShapes.map(s => s.id || 'no-id'));
                 
                 // Remove all existing shapes
                 if (typeof chart.removeAllShapes === 'function') {
                   console.log('🧹 Clearing all existing shapes...');
                   chart.removeAllShapes();
                   console.log('✅ All existing shapes cleared');
+                  
+                  // Wait a moment for the clearing to take effect
+                  await new Promise(resolve => setTimeout(resolve, 500));
+                  
+                  // Double-check that shapes are cleared
+                  const remainingShapes = chart.getAllShapes ? chart.getAllShapes() : [];
+                  console.log('🔍 Remaining shapes after clear:', remainingShapes.length);
+                  
+                  if (remainingShapes.length > 0) {
+                    console.log('⚠️ Some shapes still remain, trying to remove them individually...');
+                    console.log('⚠️ Remaining shape IDs:', remainingShapes.map(s => s.id || 'no-id'));
+                    
+                    // Try multiple clearing methods
+                    remainingShapes.forEach(shape => {
+                      if (shape.id && typeof chart.removeShape === 'function') {
+                        try {
+                          chart.removeShape(shape.id);
+                          console.log('🗑️ Removed shape:', shape.id);
+                        } catch (e) {
+                          console.warn('⚠️ Could not remove shape:', shape.id, e);
+                        }
+                      }
+                    });
+                    
+                    // Try removeAllShapes again
+                    if (typeof chart.removeAllShapes === 'function') {
+                      console.log('🧹 Trying removeAllShapes again...');
+                      chart.removeAllShapes();
+                      await new Promise(resolve => setTimeout(resolve, 200));
+                    }
+                    
+                    // Final check after individual removal
+                    const finalShapes = chart.getAllShapes ? chart.getAllShapes() : [];
+                    console.log('🔍 Final shapes count after individual removal:', finalShapes.length);
+                    
+                    if (finalShapes.length > 0) {
+                      console.log('⚠️ Still have', finalShapes.length, 'shapes remaining - this may cause accumulation');
+                    }
+                  } else {
+                    console.log('✅ All shapes successfully cleared');
+                  }
                 } else {
                   console.log('⚠️ removeAllShapes method not available');
                 }
@@ -839,6 +999,16 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
     } catch (error) {
       console.error('❌ Error loading drawings:', error);
     } finally {
+      // DEBUG: Check how many shapes exist after loading
+      if (widgetRef.current && widgetRef.current.chart) {
+        const chart = widgetRef.current.chart();
+        if (typeof chart.getAllShapes === 'function') {
+          const shapesAfterLoad = chart.getAllShapes();
+          console.log('🔍 Shapes count after loading:', shapesAfterLoad.length);
+          console.log('🔍 Shape IDs after loading:', shapesAfterLoad.map(s => s.id || 'no-id'));
+        }
+      }
+      
       setIsDrawingLines(false);
       setLoadingMessage('Loading chart...');
     }
@@ -1050,10 +1220,27 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           },
 
           subscribeBars: (symbolInfo, resolution, onRealtimeCallback, subscriberUID, onResetCacheNeededCallback) => {
+            console.log(`🔧 TradingView: subscribeBars called - selectedConfig:`, selectedConfig);
+            
             // Helper function to feed price data to trading bot
             const updateTradingBot = (bar) => {
-              if (selectedConfig?.id && tradingService) {
-                tradingService.processMarketData(selectedConfig.id, {
+              console.log(`📈 TradingView: updateTradingBot called with bar:`, bar);
+              
+              // Try to get config ID from selectedConfig first, then from active bots
+              let configId = selectedConfig?.id;
+              if (!configId && tradingService) {
+                configId = tradingService.getCurrentActiveConfigId();
+                console.log(`🔍 Got config ID from active bots:`, configId);
+              }
+              
+              console.log(`🔍 selectedConfig:`, selectedConfig);
+              console.log(`🔍 selectedConfig?.id:`, selectedConfig?.id);
+              console.log(`🔍 configId to use:`, configId);
+              console.log(`🔍 tradingService:`, !!tradingService);
+              
+              if (configId && tradingService) {
+                console.log(`✅ TradingView: Calling processMarketData for config ${configId}`);
+                tradingService.processMarketData(configId, {
                   price: bar.close,
                   time: bar.time,
                   volume: bar.volume,
@@ -1061,6 +1248,10 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                   low: bar.low,
                   open: bar.open
                 });
+              } else {
+                console.log(`❌ TradingView: Cannot call processMarketData - missing config ID or tradingService`);
+                console.log(`❌ selectedConfig:`, selectedConfig);
+                console.log(`❌ tradingService:`, tradingService);
               }
             };
             console.log('[subscribeBars]: Method called', {
@@ -1287,7 +1478,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
         };
 
         const initialInterval = selectedConfig?.interval ? convertInterval(selectedConfig.interval) : '1';
-        
+
         const widgetOptions = {
           symbol: symbol || selectedConfig?.symbol || 'AAPL',
           datafeed: datafeed,
@@ -1491,7 +1682,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           
           // Update bot with chart lines immediately after drawings are loaded
           if (selectedConfig.layout_data) {
-            tradingService.updateBotWithChartLines(selectedConfig.id, selectedConfig.layout_data);
+            tradingService.updateBotWithChartLines(selectedConfig.id, selectedConfig);
             console.log('📊 Trading bot updated with chart lines');
           }
         }
@@ -1506,6 +1697,8 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
   const lastSaveRequestRef = useRef(0);
   
   useEffect(() => {
+    console.log('🔄 TradingView useEffect triggered - onSaveRequested:', onSaveRequested, 'selectedConfig:', selectedConfig?.id);
+    
     if (onSaveRequested > 0 && selectedConfig && selectedConfig.id) {
       // Only process if this is a new save request (not a re-render with old value)
       if (onSaveRequested === lastSaveRequestRef.current) {
@@ -1536,7 +1729,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           
           // Update the bot with the line data from PUT response
           console.log('🤖 Updating bot with fresh line data after save...');
-          tradingService.updateBotWithChartLines(freshConfig.id, freshConfig.layout_data);
+          tradingService.updateBotWithChartLines(freshConfig.id, freshConfig);
         } else {
           console.warn('⚠️ No fresh config data returned from save');
         }

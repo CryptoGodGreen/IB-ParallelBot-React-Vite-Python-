@@ -54,18 +54,31 @@ export class LimitLine {
     const y1 = point1.price;
     const y2 = point2.price;
 
-    // Calculate slope: m = (y2 - y1) / (x2 - x1)
-    this.slope = (y2 - y1) / (x2 - x1);
-    
-    // Calculate intercept: b = y1 - m * x1
-    this.intercept = y1 - this.slope * x1;
+    // Check for division by zero
+    if (x1 === x2) {
+      this.slope = 0;
+      this.intercept = y1; // Use first point's price as horizontal line
+    } else {
+      // Calculate slope: m = (y2 - y1) / (x2 - x1)
+      this.slope = (y2 - y1) / (x2 - x1);
+      
+      // Calculate intercept: b = y1 - m * x1
+      this.intercept = y1 - this.slope * x1;
+    }
+
+    // Validate the calculated values
+    if (isNaN(this.slope) || isNaN(this.intercept)) {
+      // Fallback to horizontal line at average price
+      this.slope = 0;
+      this.intercept = (y1 + y2) / 2;
+    }
 
     // Determine line direction and characteristics
     this.direction = this.getLineDirection();
     this.slopeStrength = this.getSlopeStrength();
     this.isTrendFollowing = this.slopeStrength > 0.1; // Significant trend if slope > 0.1
 
-    console.log(`LimitLine ${this.id}: slope=${this.slope.toFixed(4)}, direction=${this.direction}, strength=${this.slopeStrength.toFixed(4)}`);
+    console.log(`LimitLine ${this.id}: Final calculation - slope=${this.slope.toFixed(4)}, intercept=${this.intercept.toFixed(4)}, direction=${this.direction}, strength=${this.slopeStrength.toFixed(4)}`);
   }
 
   /**
@@ -147,9 +160,24 @@ export class LimitLine {
    * @returns {number} Candle index
    */
   timeToCandleIndex(timestamp) {
-    // Assuming 1-minute candles starting from market open
-    const marketOpen = new Date().setHours(9, 30, 0, 0); // 9:30 AM EST
-    return Math.floor((timestamp - marketOpen) / 60000); // 60000ms = 1 minute
+    // Handle invalid timestamps
+    if (!timestamp || timestamp <= 0) {
+      console.warn(`LimitLine ${this.id}: Invalid timestamp: ${timestamp}`);
+      return 0;
+    }
+
+    // Convert timestamp to Date object
+    const pointDate = new Date(timestamp * 1000); // TradingView timestamps are in seconds
+    const now = new Date();
+    
+    // For historical points, we need to calculate their position relative to current time
+    // This allows us to project the line into the future
+    
+    // Calculate minutes difference from current time
+    const timeDiffMinutes = Math.floor((pointDate - now) / 60000);
+    
+    
+    return timeDiffMinutes;
   }
 
   /**
@@ -158,10 +186,17 @@ export class LimitLine {
    * @returns {number} Calculated price level
    */
   calculateCurrentPrice(currentCandleIndex) {
+    // Check if slope and intercept are valid
+    if (isNaN(this.slope) || isNaN(this.intercept)) {
+      console.warn(`LimitLine ${this.id}: Cannot calculate price - invalid slope (${this.slope}) or intercept (${this.intercept})`);
+      return 0;
+    }
+
     // Linear equation: price = slope * candleIndex + intercept
     const calculatedPrice = this.slope * currentCandleIndex + this.intercept;
     this.currentPrice = calculatedPrice;
     this.lastUpdateTime = Date.now();
+    
     return calculatedPrice;
   }
 

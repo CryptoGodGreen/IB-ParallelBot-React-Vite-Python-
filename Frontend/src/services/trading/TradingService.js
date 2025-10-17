@@ -84,7 +84,7 @@ export class TradingService {
     // Update bot configuration
     bot.updateConfig({
       maxPosition: botConfig.max_position || 10000,
-      positionSize: botConfig.position_size || 1000,
+      positionSize: botConfig.trade_amount || 1000, // Use trade_amount from config
       maxDistanceFromEntry: botConfig.max_distance_from_entry || 0.05,
       updateInterval: botConfig.update_interval || 1000
     });
@@ -114,18 +114,27 @@ export class TradingService {
   /**
    * Update bot with TradingView chart lines using intelligent line assignment
    * @param {number} configId - Configuration ID
-   * @param {Object} layoutData - TradingView layout data
+   * @param {Object} configData - Full configuration data including trade_amount
    */
-  updateBotWithChartLines(configId, layoutData) {
+  updateBotWithChartLines(configId, configData) {
     console.log(`🤖 TradingService: updateBotWithChartLines called for config ${configId}`);
-    console.log(`🤖 Layout data:`, layoutData);
-    console.log(`🤖 Entry line:`, layoutData?.entry_line);
-    console.log(`🤖 Exit line:`, layoutData?.exit_line);
+    console.log(`🤖 Config data:`, configData);
+    console.log(`🤖 Trade amount:`, configData.trade_amount);
     
     const bot = this.activeBots.get(configId);
     if (!bot) {
       console.warn(`TradingService: No bot found for config ${configId}`);
       return;
+    }
+
+    // Update bot configuration with trade_amount
+    if (configData.trade_amount) {
+      bot.updateConfig({
+        positionSize: configData.trade_amount
+      });
+      console.log(`💰 TradingService: Updated bot ${configId} position size to $${configData.trade_amount} (from config trade_amount)`);
+    } else {
+      console.log(`⚠️ TradingService: No trade_amount found in config ${configId}, using default`);
     }
 
     // Clear existing lines
@@ -136,43 +145,103 @@ export class TradingService {
     // Collect all line data for intelligent assignment
     const allLinesData = [];
 
-    // Add entry line if provided - mark it explicitly as entry line for old Ruby system
-    if (layoutData.entry_line && layoutData.entry_line.p1 && layoutData.entry_line.p2) {
-      allLinesData.push({
-        id: 'entry_line',
-        is_entry_line: true, // Explicitly mark as entry line for old Ruby system logic
-        points: [
-          { time: layoutData.entry_line.p1.time, price: layoutData.entry_line.p1.price },
-          { time: layoutData.entry_line.p2.time, price: layoutData.entry_line.p2.price }
-        ]
-      });
-    }
+    // Skip the separate entry_line - we'll use the drawn lines instead
+    // The entry line should be one of the user-drawn lines, not a separate backend entry_line
 
-    // Add all drawings from TradingView
-    if (layoutData.other_drawings && layoutData.other_drawings.tradingview_drawings) {
-      const drawings = layoutData.other_drawings.tradingview_drawings;
+    // Simple approach: Use whatever drawings are available
+    let drawings = [];
+    
+    if (configData.layout_data?.other_drawings?.active_shapes) {
+      drawings = configData.layout_data.other_drawings.active_shapes;
+      console.log(`TradingService: Using active_shapes - ${drawings.length} shapes`);
+    } else if (configData.layout_data?.other_drawings?.tradingview_drawings) {
+      drawings = configData.layout_data.other_drawings.tradingview_drawings;
+      console.log(`TradingService: Using tradingview_drawings - ${drawings.length} drawings`);
+    } else {
+      console.log(`TradingService: No drawings found in layout_data`);
+    }
+    
+    if (drawings.length > 0) {
       
-      drawings.forEach(drawing => {
-        // Check if it's a trend line with sufficient points
-        const isTrendLine = drawing.type === 'trend_line' || 
-                           drawing.shape === 'trend_line' || 
-                           drawing.name === 'trend_line' ||
-                           drawing.type === 'LineToolTrendLine' ||
-                           (drawing.points && drawing.points.length >= 2);
+      console.log(`TradingService: Processing ${drawings.length} drawings from TradingView`);
+      console.log(`TradingService: Drawing IDs:`, drawings.map(d => d.id || 'unnamed'));
+      console.log(`TradingService: Drawing types:`, drawings.map(d => d.type || 'no-type'));
+      console.log(`TradingService: Full drawing data:`, drawings.map(d => ({
+        id: d.id,
+        type: d.type,
+        shape: d.shape,
+        name: d.name,
+        points: d.points ? d.points.length : 'no-points'
+      })));
+      
+      // Filter out duplicate drawings by ID to prevent accumulation
+      const uniqueDrawings = [];
+      const seenIds = new Set();
+      
+      drawings.forEach((drawing, index) => {
+        const drawingId = drawing.id || `drawing_${index}`;
         
-        if (isTrendLine && drawing.points && drawing.points.length >= 2) {
+        if (seenIds.has(drawingId)) {
+          console.log(`TradingService: Skipping duplicate drawing: ${drawingId}`);
+          return;
+        }
+        
+        seenIds.add(drawingId);
+        uniqueDrawings.push(drawing);
+      });
+      
+      console.log(`TradingService: After deduplication: ${uniqueDrawings.length} unique drawings`);
+      
+      uniqueDrawings.forEach((drawing, index) => {
+        // Only process actual trend lines that were drawn by the user
+        const isUserDrawnTrendLine = (
+          drawing.type === 'trend_line' || 
+          drawing.shape === 'trend_line' || 
+          drawing.name === 'trend_line' ||
+          drawing.type === 'LineToolTrendLine'
+        ) && drawing.points && drawing.points.length >= 2;
+        
+        if (isUserDrawnTrendLine) {
+          console.log(`TradingService: Found user-drawn trend line ${index + 1}: ${drawing.id || 'unnamed'} (type: ${drawing.type})`);
           allLinesData.push({
             id: drawing.id || `line_${allLinesData.length}`,
-            is_entry_line: false, // Mark all other lines as exit lines for old Ruby system
+            is_entry_line: false, // Will be assigned intelligently below
             points: drawing.points
           });
+        } else {
+          console.log(`TradingService: Skipping non-trend-line drawing ${index + 1}: ${drawing.type || 'unknown'} (${drawing.id || 'unnamed'})`);
         }
       });
+    } else {
+      console.log(`TradingService: No drawings found in layout_data`);
     }
 
     console.log(`TradingService: Found ${allLinesData.length} lines for intelligent assignment`);
 
     if (allLinesData.length > 0) {
+      // Intelligently assign entry vs exit lines based on price levels
+      // Lowest line = entry line, higher lines = exit lines
+      allLinesData.sort((a, b) => {
+        const priceA = Math.min(a.points[0].price, a.points[1].price);
+        const priceB = Math.min(b.points[0].price, b.points[1].price);
+        return priceA - priceB; // Sort by lowest price first
+      });
+      
+      // Assign first (lowest) line as entry, rest as exits
+      allLinesData.forEach((lineData, index) => {
+        if (index === 0) {
+          lineData.is_entry_line = true;
+          console.log(`TradingService: Assigned entry line: ${lineData.id} (price: ${Math.min(lineData.points[0].price, lineData.points[1].price).toFixed(2)})`);
+        } else {
+          lineData.is_entry_line = false;
+          console.log(`TradingService: Assigned exit line: ${lineData.id} (price: ${Math.min(lineData.points[0].price, lineData.points[1].price).toFixed(2)})`);
+        }
+      });
+      
+      console.log(`TradingService: Final line assignment - Total lines: ${allLinesData.length}`);
+      console.log(`TradingService: Entry lines: ${allLinesData.filter(l => l.is_entry_line).length}`);
+      console.log(`TradingService: Exit lines: ${allLinesData.filter(l => !l.is_entry_line).length}`);
+      
       // Use intelligent line assignment based on direction and market context
       bot.assignLinesIntelligently(allLinesData);
       console.log(`TradingService: Intelligently assigned lines for config ${configId} - Entry: ${bot.entryLine?.id || 'none'}, Exits: ${bot.exitLines.length}`);
@@ -326,9 +395,13 @@ export class TradingService {
    * @param {Object} marketData - Market data
    */
   processMarketData(configId, marketData) {
+    console.log(`🚀 TradingService: processMarketData called for config ${configId} with price ${marketData.price}`);
+    console.log(`📊 Market data:`, marketData);
+    
     const bot = this.activeBots.get(configId);
     if (!bot) {
-      console.warn(`TradingService: No bot found for config ${configId} when processing market data`);
+      console.warn(`❌ TradingService: No bot found for config ${configId} when processing market data`);
+      console.log(`🔍 Available bots:`, Array.from(this.activeBots.keys()));
       return;
     }
     
@@ -337,13 +410,16 @@ export class TradingService {
       return;
     }
 
+    console.log(`TradingService: Bot ${configId} is running, processing price update...`);
+
     // Update bot with current market price
     console.log(`TradingService: Updating bot ${configId} with real-time price ${marketData.price.toFixed(4)}`);
     
     // Validate that the price is reasonable
     if (marketData.price && marketData.price > 0 && marketData.price < 100000) {
+      const oldPrice = bot.currentPrice;
       bot.currentPrice = marketData.price;
-      console.log(`TradingService: Price validated and set to ${bot.currentPrice.toFixed(4)}`);
+      console.log(`TradingService: Price updated from ${oldPrice.toFixed(4)} to ${bot.currentPrice.toFixed(4)}`);
     } else {
       console.warn(`TradingService: Invalid real-time price received: ${marketData.price}`);
     }
@@ -382,6 +458,79 @@ export class TradingService {
       totalFilled: status.entryLine?.totalFilled + 
                    status.exitLines?.reduce((sum, line) => sum + line.totalFilled, 0) || 0
     };
+  }
+
+  /**
+   * Enable or disable browser alerts for price crossings
+   * @param {number} configId - Configuration ID
+   * @param {boolean} enabled - Whether to enable alerts
+   */
+  setAlertsEnabled(configId, enabled) {
+    const bot = this.activeBots.get(configId);
+    if (bot) {
+      bot.setAlertsEnabled(enabled);
+    } else {
+      console.warn(`TradingService: No bot found for config ${configId}`);
+    }
+  }
+
+  /**
+   * Get crossing events for a configuration
+   * @param {number} configId - Configuration ID
+   * @returns {Array} Array of crossing events
+   */
+  getCrossingEvents(configId) {
+    const bot = this.activeBots.get(configId);
+    if (bot) {
+      return bot.getCrossingEvents();
+    } else {
+      console.warn(`TradingService: No bot found for config ${configId}`);
+      return [];
+    }
+  }
+
+  /**
+   * Clear crossing events for a configuration
+   * @param {number} configId - Configuration ID
+   */
+  clearCrossingEvents(configId) {
+    const bot = this.activeBots.get(configId);
+    if (bot) {
+      bot.clearCrossingEvents();
+    } else {
+      console.warn(`TradingService: No bot found for config ${configId}`);
+    }
+  }
+
+  /**
+   * Test price crossing detection for a configuration
+   * @param {number} configId - Configuration ID
+   */
+  testPriceCrossing(configId) {
+    const bot = this.activeBots.get(configId);
+    if (bot) {
+      bot.testPriceCrossing();
+    } else {
+      console.warn(`TradingService: No bot found for config ${configId}`);
+    }
+  }
+
+  /**
+   * Get the current active config ID (if only one bot is running)
+   * @returns {number|null} The active config ID or null if none/multiple
+   */
+  getCurrentActiveConfigId() {
+    const activeBots = Array.from(this.activeBots.entries()).filter(([id, bot]) => bot.isRunning);
+    
+    if (activeBots.length === 1) {
+      return activeBots[0][0]; // Return the config ID
+    } else if (activeBots.length === 0) {
+      console.log(`TradingService: No active bots found`);
+      return null;
+    } else {
+      console.log(`TradingService: Multiple active bots found:`, activeBots.map(([id, bot]) => id));
+      return null;
+    }
   }
 }
 

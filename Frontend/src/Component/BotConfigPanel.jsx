@@ -63,12 +63,17 @@ const BotConfigPanel = ({
   };
 
   const handleSave = () => {
+    console.log('🚀 BotConfigPanel Save button clicked!');
+    console.log('🚀 selectedConfig:', selectedConfig);
+    console.log('🚀 config state:', config);
+    
     // Extract only the fields that the backend expects
     const configData = {
       name: config.name,
       symbol: config.symbol,
       interval: selectedConfig?.interval || '1M', // Use interval from selectedConfig or default to 1M
       rth: true, // Default to true like in ConfigurationPanel
+      trade_amount: config.tradeAmount, // Include trade amount for position sizing
       // Keep existing layout_data if available
       layout_data: selectedConfig?.layout_data || {
         entry_line: null,
@@ -80,7 +85,9 @@ const BotConfigPanel = ({
     };
     
     console.log('💾 BotConfigPanel: Sending config data:', configData);
+    console.log('💾 BotConfigPanel: Calling onConfigUpdate...');
     onConfigUpdate(configData);
+    console.log('💾 BotConfigPanel: onConfigUpdate called successfully');
     // The TradingDashboard will handle saving drawings via the save trigger
   };
 

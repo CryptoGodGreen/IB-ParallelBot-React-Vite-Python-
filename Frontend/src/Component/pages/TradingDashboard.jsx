@@ -100,9 +100,10 @@ const TradingDashboard = () => {
   };
 
   const handleConfigSave = async (configData) => {
-    console.log('💾 BotConfigPanel Save button clicked');
-    console.log('💾 selectedConfig:', selectedConfig);
-    console.log('💾 configData:', configData);
+    console.log('🚀 TradingDashboard handleConfigSave called!');
+    console.log('🚀 BotConfigPanel Save button clicked');
+    console.log('🚀 selectedConfig:', selectedConfig);
+    console.log('🚀 configData:', configData);
     
     if (selectedConfig && selectedConfig.id) {
       console.log('💾 Updating configuration:', selectedConfig.id);

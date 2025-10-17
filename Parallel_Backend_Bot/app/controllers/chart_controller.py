@@ -64,10 +64,23 @@ async def update_chart(
 ) -> UserChart:
     """
     Updates an existing chart layout, ensuring it belongs to the current user.
+    When layout_data is provided, it completely replaces the existing data to prevent accumulation.
     """
     db_chart = await get_chart_by_id(db, chart_id, current_user) # Re-uses the fetch and auth logic
 
     update_data = chart_data.model_dump(exclude_unset=True)
+    
+    # Special handling for layout_data - completely replace to prevent accumulation
+    if 'layout_data' in update_data:
+        logger.info(f"🔄 Replacing layout_data for chart {chart_id} - clearing old drawings")
+        logger.info(f"📊 New layout_data keys: {list(update_data['layout_data'].keys()) if isinstance(update_data['layout_data'], dict) else 'not a dict'}")
+        
+        # Completely replace layout_data to prevent accumulation of old drawings
+        db_chart.layout_data = update_data['layout_data']
+        # Remove from update_data to avoid double-setting
+        del update_data['layout_data']
+    
+    # Update other fields normally
     for key, value in update_data.items():
         setattr(db_chart, key, value)
     
