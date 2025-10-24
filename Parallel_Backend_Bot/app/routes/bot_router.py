@@ -284,6 +284,94 @@ async def cancel_all_orders(
         logger.error(f"Error cancelling orders for bot {bot_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to cancel orders: {str(e)}")
 
+@router.get("/{bot_id}/trade-history", response_model=List[dict])
+async def get_bot_trade_history(
+    bot_id: int,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Get trade history for a specific bot"""
+    try:
+        from app.db.postgres import AsyncSessionLocal
+        from sqlalchemy import select
+        from app.models.bot_models import BotEvent
+        
+        async with AsyncSessionLocal() as session:
+            # Get bot events for the specific bot
+            result = await session.execute(
+                select(BotEvent)
+                .where(BotEvent.bot_id == bot_id)
+                .order_by(BotEvent.timestamp.desc())
+            )
+            events = result.scalars().all()
+            
+            # Transform events into trade history format
+            trade_history = []
+            for event in events:
+                event_data = event.event_data or {}
+                
+                # Map event types to trade history format
+                if event.event_type == "spot_position_opened":
+                    trade_history.append({
+                        "side": "BUY",
+                        "filled": "Yes",
+                        "target": "Entry",
+                        "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                        "shares_filled": event_data.get("shares_bought", 0),
+                        "price": event_data.get("entry_price", 0),
+                        "order_id": event_data.get("order_id"),
+                        "event_type": event.event_type
+                    })
+                elif event.event_type == "spot_position_partial_exit":
+                    trade_history.append({
+                        "side": "SELL",
+                        "filled": "Yes",
+                        "target": "Exit",
+                        "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                        "shares_filled": event_data.get("shares_sold", 0),
+                        "price": event_data.get("exit_price", 0),
+                        "order_id": event_data.get("order_id"),
+                        "event_type": event.event_type
+                    })
+                elif event.event_type == "hard_stop_out_sell":
+                    trade_history.append({
+                        "side": "SELL",
+                        "filled": "Yes",
+                        "target": "Hard Stop",
+                        "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                        "shares_filled": event_data.get("shares_sold", 0),
+                        "price": event_data.get("current_price", 0),
+                        "order_id": event_data.get("order_id"),
+                        "event_type": event.event_type
+                    })
+                elif event.event_type == "exit_order_created":
+                    trade_history.append({
+                        "side": "SELL",
+                        "filled": "Pending",
+                        "target": "Exit",
+                        "filled_at": None,
+                        "shares_filled": event_data.get("shares_to_sell", 0),
+                        "price": event_data.get("line_price", 0),
+                        "order_id": event_data.get("order_id"),
+                        "event_type": event.event_type
+                    })
+                elif event.event_type == "stop_loss_order_placed":
+                    trade_history.append({
+                        "side": "SELL",
+                        "filled": "Pending",
+                        "target": "Stop Loss",
+                        "filled_at": None,
+                        "shares_filled": event_data.get("quantity", 0),
+                        "price": event_data.get("stop_loss_price", 0),
+                        "order_id": event_data.get("order_id"),
+                        "event_type": event.event_type
+                    })
+            
+            return trade_history
+            
+    except Exception as e:
+        logger.error(f"Error getting trade history for bot {bot_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get trade history: {str(e)}")
+
 @router.get("/service/status")
 async def get_service_status(
     current_user: UserResponse = Depends(get_current_user)
