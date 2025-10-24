@@ -8,6 +8,8 @@ import time
 
 from app.db.postgres import AsyncSessionLocal
 from app.models.market_data import SymbolInfo, CandlestickData
+from app.utils.ib_client import ib_client
+from app.utils.ib_interface import ib_interface
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/udf", tags=["UDF"])
@@ -23,8 +25,6 @@ CACHE_TTL = 300  # 5 minutes
 @router.get("/ibkr-status")
 async def ibkr_connection_status():
     """Check IBKR connection status"""
-    from app.utils.ib_client import ib_client
-    
     is_connected = ib_client.ib.isConnected()
     
     return {
@@ -34,6 +34,66 @@ async def ibkr_connection_status():
         "port": ib_client.ib.client.port if is_connected else None,
         "client_id": ib_client.ib.client.clientId if is_connected else None
     }
+
+@router.get("/positions")
+async def get_positions():
+    """Get all positions from IB account"""
+    try:
+        if not ib_client.ib.isConnected():
+            raise HTTPException(status_code=503, detail="IBKR not connected")
+        
+        # Get portfolio data instead of positions for better data including average cost
+        portfolio = await ib_client.get_portfolio()
+        
+        # Debug: Log available attributes on Portfolio object
+        if portfolio:
+            logger.info(f"Portfolio object attributes: {dir(portfolio[0])}")
+            logger.info(f"Portfolio object: {portfolio[0]}")
+        
+        # Convert IB portfolio to a more usable format
+        formatted_positions = []
+        for item in portfolio:
+            # Portfolio items have different structure than positions
+            # Try different possible attribute names for average cost
+            avg_price = (
+                getattr(item, 'averageCost', None) or 
+                getattr(item, 'avgCost', None) or 
+                getattr(item, 'cost', None) or 
+                getattr(item, 'average_cost', None) or
+                0.0
+            )
+            
+            market_price = (
+                getattr(item, 'marketPrice', None) or 
+                getattr(item, 'market_price', None) or 
+                getattr(item, 'price', None) or
+                0.0
+            )
+            
+            # Only include items with non-zero position
+            position_qty = getattr(item, 'position', 0) or getattr(item, 'qty', 0) or 0
+            if position_qty != 0:
+                formatted_positions.append({
+                    "symbol": item.contract.symbol,
+                    "qty": position_qty,
+                    "avgPrice": avg_price,
+                    "marketPrice": market_price,
+                    "marketValue": getattr(item, 'marketValue', 0.0),
+                    "unrealizedPnL": getattr(item, 'unrealizedPNL', 0.0),
+                    "realizedPnL": getattr(item, 'realizedPNL', 0.0),
+                    "contract": {
+                        "symbol": item.contract.symbol,
+                        "secType": item.contract.secType,
+                        "exchange": item.contract.exchange,
+                        "currency": item.contract.currency
+                    }
+                })
+        
+        return formatted_positions
+        
+    except Exception as e:
+        logger.error(f"Error fetching positions: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching positions: {str(e)}")
 
 async def get_db() -> AsyncSession:
     """Dependency to get database session"""
@@ -325,11 +385,11 @@ async def get_history(
         
         # Set cache TTL based on resolution and request type
         if is_realtime_request and resolution == '1':
-            cache_ttl = 30  # 30 seconds for 1-minute real-time requests
+            cache_ttl = 10  # 10 seconds for 1-minute real-time requests
         elif is_realtime_request and resolution in ['3', '5']:
-            cache_ttl = 60  # 1 minute for 3-5 minute real-time requests
+            cache_ttl = 15  # 15 seconds for 3-5 minute real-time requests
         elif is_realtime_request:
-            cache_ttl = 120  # 2 minutes for other real-time requests
+            cache_ttl = 20  # 20 seconds for other real-time requests
         else:
             cache_ttl = 300  # 5 minutes for historical data requests
         

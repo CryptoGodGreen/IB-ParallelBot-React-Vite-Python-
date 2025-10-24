@@ -136,6 +136,95 @@ class IBClient:
         trade = self.ib.placeOrder(contract, order)
         return trade
     
+    async def get_positions(self):
+        """Get all positions from IB account"""
+        await self.ensure_connected()
+        positions = self.ib.positions()
+        return positions
+    
+    async def get_portfolio(self):
+        """Get portfolio data including average cost"""
+        await self.ensure_connected()
+        portfolio = self.ib.portfolio()
+        return portfolio
+    
+    async def get_order_status(self, order_id: int) -> str:
+        """Get the status of an order by its ID"""
+        await self.ensure_connected()
+        try:
+            # Get all open orders
+            open_orders = self.ib.openOrders()
+            logger.info(f"🔍 Checking order {order_id} status. Open orders: {len(open_orders)}")
+            
+            # Find the order by ID
+            for order in open_orders:
+                if order.order.orderId == order_id:
+                    logger.info(f"🔍 Found order {order_id} in open orders: {order.orderStatus.status}")
+                    return order.orderStatus.status
+            
+            # If not found in open orders, check filled orders
+            fills = self.ib.fills()
+            logger.info(f"🔍 Checking fills for order {order_id}. Total fills: {len(fills)}")
+            
+            for fill in fills:
+                if fill.execution.orderId == order_id:
+                    logger.info(f"🔍 Found order {order_id} in fills: Filled")
+                    return "Filled"
+            
+            logger.info(f"🔍 Order {order_id} not found in open orders or fills")
+            return "Unknown"
+        except Exception as e:
+            logger.error(f"Error getting order status for {order_id}: {e}")
+            return "Error"
+    
+    async def modify_order(self, order_id: int, new_price: float) -> bool:
+        """Modify an existing order's price"""
+        await self.ensure_connected()
+        try:
+            # Get all open orders
+            open_orders = self.ib.openOrders()
+            
+            # Find the order by ID
+            for order in open_orders:
+                if order.order.orderId == order_id:
+                    # Modify the order
+                    order.order.lmtPrice = new_price
+                    self.ib.placeOrder(order.contract, order.order)
+                    logger.info(f"Modified order {order_id} price to {new_price}")
+                    return True
+            
+            logger.warning(f"Order {order_id} not found for modification")
+            return False
+        except Exception as e:
+            logger.error(f"Error modifying order {order_id}: {e}")
+            return False
+    
+    async def cancel_order(self, order_id: int) -> bool:
+        """Cancel an order by its ID"""
+        await self.ensure_connected()
+        try:
+            # Get all open orders
+            open_orders = self.ib.openOrders()
+            
+            # Find the order by ID
+            for order in open_orders:
+                if order.order.orderId == order_id:
+                    # Cancel the order
+                    self.ib.cancelOrder(order.order)
+                    logger.info(f"✅ Cancelled order {order_id}")
+                    return True
+            
+            logger.warning(f"Order {order_id} not found in open orders")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error cancelling order {order_id}: {e}")
+            return False
+    
+    async def get_contract(self, symbol: str) -> Optional[Contract]:
+        """Alias for qualify_stock for backward compatibility"""
+        return await self.qualify_stock(symbol)
+    
     # --- Event Handlers ---
     def on_error(self, reqId, errorCode, errorString, contract=None):
         # Ignore informational messages about connectivity

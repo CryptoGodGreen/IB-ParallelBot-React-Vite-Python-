@@ -1,6 +1,11 @@
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
 from datetime import datetime
+from enum import Enum
+
+class TrendStrategy(str, Enum):
+    uptrend = "uptrend"
+    downtrend = "downtrend"
 
 # --- Sub-models for structured layout_data ---
 
@@ -68,7 +73,9 @@ class ChartDataBase(BaseModel):
     interval: str
     rth: bool = True
     trade_amount: Optional[float] = 1000  # Trade amount in USD
+    trend_strategy: TrendStrategy = TrendStrategy.uptrend  # Trading strategy
     layout_data: LayoutData # Using the new structured model
+    bot_hard_stop_out: Optional[str] = "5"  # Hard stop-out percentage (default 5%)
 
 class ChartCreate(ChartDataBase):
     """Schema for creating a new chart layout."""
@@ -81,7 +88,9 @@ class ChartUpdate(BaseModel):
     interval: Optional[str] = None
     rth: Optional[bool] = None
     trade_amount: Optional[float] = None  # Trade amount in USD
+    trend_strategy: Optional[TrendStrategy] = None  # Trading strategy
     layout_data: Optional[LayoutData] = None
+    bot_hard_stop_out: Optional[str] = None  # Hard stop-out percentage
 
 class ChartResponse(ChartDataBase):
     """Schema for returning chart data from the API."""

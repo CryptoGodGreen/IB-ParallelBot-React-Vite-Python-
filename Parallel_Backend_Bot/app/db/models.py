@@ -15,6 +15,10 @@ class TradingStatus(str, enum.Enum):
     started = "started"
     stopped = "stopped"
 
+class TrendStrategy(str, enum.Enum):
+    uptrend = "uptrend"  # Use spot/equity trading
+    downtrend = "downtrend"  # Use options trading
+
 class User(Base):
     __tablename__ = "users"
 
@@ -39,6 +43,8 @@ class UserChart(Base):
     interval = Column(String, nullable=False)
     rth = Column(Boolean, default=True)
     trade_amount = Column(Numeric(10, 2), default=1000)  # Trade amount in USD
+    trend_strategy = Column(Enum(TrendStrategy), default=TrendStrategy.uptrend, nullable=False)
+    bot_hard_stop_out = Column(String, default="5")  # Hard stop-out percentage (default 5%)
     
     # layout_data will store line coordinates, TP/SL settings, etc.
     layout_data = Column(JSON, nullable=False)

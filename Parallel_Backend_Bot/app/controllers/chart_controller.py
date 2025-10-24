@@ -90,10 +90,47 @@ async def update_chart(
 
 async def delete_chart(db: AsyncSession, chart_id: int, current_user: UserResponse):
     """
-    Deletes a chart layout, ensuring it belongs to the current user.
+    Deletes a chart layout and any associated bot instances, ensuring it belongs to the current user.
     """
     db_chart = await get_chart_by_id(db, chart_id, current_user) # Re-uses the fetch and auth logic
 
+    # Import here to avoid circular imports
+    from app.models.bot_models import BotInstance, BotLine, BotEvent
+    from app.services.bot_service import bot_service
+    
+    # Find and stop any associated bot instances
+    result = await db.execute(
+        select(BotInstance).where(BotInstance.config_id == chart_id)
+    )
+    bot_instances = result.scalars().all()
+    
+    for bot_instance in bot_instances:
+        logger.info(f"🤖 Stopping and deleting bot {bot_instance.id} for deleted config {chart_id}")
+        
+        # Use bot service to clean up the bot instance
+        await bot_service.delete_bot_instance(bot_instance.id)
+        
+        # Delete associated bot lines and events from database
+        lines_result = await db.execute(
+            select(BotLine).where(BotLine.bot_id == bot_instance.id)
+        )
+        bot_lines = lines_result.scalars().all()
+        for line in bot_lines:
+            await db.delete(line)
+        
+        events_result = await db.execute(
+            select(BotEvent).where(BotEvent.bot_id == bot_instance.id)
+        )
+        bot_events = events_result.scalars().all()
+        for event in bot_events:
+            await db.delete(event)
+        
+        # Delete the bot instance from database
+        await db.delete(bot_instance)
+    
+    # Delete the chart
     await db.delete(db_chart)
     await db.commit()
-    return {"detail": "Chart deleted successfully"}
+    
+    logger.info(f"🗑️ Deleted chart {chart_id} and {len(bot_instances)} associated bot instances")
+    return {"detail": f"Chart deleted successfully along with {len(bot_instances)} bot instances"}
