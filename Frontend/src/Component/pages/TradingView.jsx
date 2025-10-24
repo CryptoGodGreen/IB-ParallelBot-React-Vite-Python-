@@ -17,11 +17,29 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
   const [isDrawingLines, setIsDrawingLines] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('Loading chart...');
 
-  const handleRetry = () => {
-    setError(null);
-    setIsLoading(true);
-    setRetryKey(prev => prev + 1);
-  };
+  // Debug selectedConfig changes and add fallback
+  useEffect(() => {
+    console.log('🔍 TradingView: selectedConfig changed:', selectedConfig);
+    if (selectedConfig) {
+      console.log('🔍 TradingView: selectedConfig.id:', selectedConfig.id);
+      // Store the selected config in localStorage as backup
+      localStorage.setItem('lastSelectedConfig', JSON.stringify(selectedConfig));
+    } else {
+      console.log('⚠️ TradingView: selectedConfig is null!');
+      // Try to restore from localStorage if available
+      const lastConfig = localStorage.getItem('lastSelectedConfig');
+      if (lastConfig) {
+        try {
+          const parsedConfig = JSON.parse(lastConfig);
+          console.log('🔄 TradingView: Restoring config from localStorage:', parsedConfig);
+          // Note: We can't directly set selectedConfig here as it's a prop
+          // This is just for debugging purposes
+        } catch (error) {
+          console.error('❌ TradingView: Failed to parse lastSelectedConfig:', error);
+        }
+      }
+    }
+  }, [selectedConfig]);
 
   // Save drawings to backend using TradingView's proper API
   const saveDrawingsToConfig = async (configId, configData) => {
@@ -1233,26 +1251,27 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                 console.log(`🔍 Got config ID from active bots:`, configId);
               }
               
+              // If still no configId, try to get it from localStorage backup
+              if (!configId) {
+                const lastConfig = localStorage.getItem('lastSelectedConfig');
+                if (lastConfig) {
+                  try {
+                    const parsedConfig = JSON.parse(lastConfig);
+                    configId = parsedConfig.id;
+                    console.log(`🔍 Got config ID from localStorage backup:`, configId);
+                  } catch (error) {
+                    console.error('❌ Failed to parse lastSelectedConfig:', error);
+                  }
+                }
+              }
+              
               console.log(`🔍 selectedConfig:`, selectedConfig);
               console.log(`🔍 selectedConfig?.id:`, selectedConfig?.id);
               console.log(`🔍 configId to use:`, configId);
               console.log(`🔍 tradingService:`, !!tradingService);
               
-              if (configId && tradingService) {
-                console.log(`✅ TradingView: Calling processMarketData for config ${configId}`);
-                tradingService.processMarketData(configId, {
-                  price: bar.close,
-                  time: bar.time,
-                  volume: bar.volume,
-                  high: bar.high,
-                  low: bar.low,
-                  open: bar.open
-                });
-              } else {
-                console.log(`❌ TradingView: Cannot call processMarketData - missing config ID or tradingService`);
-                console.log(`❌ selectedConfig:`, selectedConfig);
-                console.log(`❌ tradingService:`, tradingService);
-              }
+              // Bot logic is now handled by the backend
+              console.log(`📊 TradingView: Market data received for config ${configId} - Bot logic handled by backend`);
             };
             console.log('[subscribeBars]: Method called', {
               subscriberUID,
@@ -1675,17 +1694,8 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
         
         await loadDrawingsForConfig(selectedConfig.id);
         
-        // Initialize trading bot with configuration
-        const bot = tradingService.createBotFromConfig(selectedConfig);
-        if (bot) {
-          console.log('🤖 Trading bot created for config:', selectedConfig.id);
-          
-          // Update bot with chart lines immediately after drawings are loaded
-          if (selectedConfig.layout_data) {
-            tradingService.updateBotWithChartLines(selectedConfig.id, selectedConfig);
-            console.log('📊 Trading bot updated with chart lines');
-          }
-        }
+        // Bot logic is now handled by the backend
+        console.log('🤖 Bot logic handled by backend for config:', selectedConfig.id);
       };
       
       loadImmediately();

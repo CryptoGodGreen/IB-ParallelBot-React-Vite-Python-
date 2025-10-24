@@ -128,6 +128,28 @@
   background: #7c3aed;
 }
 
+.market-sell-btn {
+  background: #dc2626;
+  color: white;
+  font-weight: 600;
+  grid-column: 1 / -1; /* Span full width */
+}
+
+.market-sell-btn:hover {
+  background: #b91c1c;
+}
+
+.cancel-orders-btn {
+  background: #f59e0b;
+  color: white;
+  font-weight: 600;
+  grid-column: 1 / -1; /* Span full width */
+}
+
+.cancel-orders-btn:hover {
+  background: #d97706;
+}
+
 .order-status {
   display: flex;
   align-items: center;
@@ -207,6 +229,100 @@
   color: #dc2626;
 }
 
+.status-value.bought {
+  color: #10b981;
+  font-weight: 600;
+}
+
+.status-value.not-bought {
+  color: #6b7280;
+}
+
+.status-value.completed {
+  color: #dc2626; /* Red for completed */
+}
+
+.status-value.running {
+  color: #16a34a; /* Green for running */
+}
+
+.status-value.hard-stopped {
+  color: #dc2626; /* Red for hard stopped */
+}
+
+/* Trade History Table Styling */
+.trade-history-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #333;
+}
+
+.trade-history-section h3 {
+  margin: 0 0 15px 0;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.trade-history-table {
+  overflow-x: auto;
+}
+
+.trade-history-table table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #1a1a1a;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.trade-history-table th {
+  background: #2a2a2a;
+  color: #fff;
+  padding: 12px 8px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  border-bottom: 1px solid #333;
+}
+
+.trade-history-table td {
+  padding: 10px 8px;
+  color: #ccc;
+  font-size: 12px;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.trade-history-table tr:last-child td {
+  border-bottom: none;
+}
+
+.trade-history-table tr:hover {
+  background: #2a2a2a;
+}
+
+/* Side column styling */
+.trade-history-table .side.buy {
+  color: #10b981; /* Green for BUY */
+  font-weight: 600;
+}
+
+.trade-history-table .side.sell {
+  color: #ef4444; /* Red for SELL */
+  font-weight: 600;
+}
+
+/* Filled column styling */
+.trade-history-table .filled.yes {
+  color: #10b981; /* Green for Yes */
+  font-weight: 600;
+}
+
+.trade-history-table .filled.pending {
+  color: #f59e0b; /* Orange for Pending */
+  font-weight: 600;
+}
+
 .trades-section {
   background: #0f172a;
   border: 1px solid #334155;
@@ -252,4 +368,18 @@
 
 .trade-row:last-child {
   border-bottom: none;
+}
+
+/* Status Section Styling */
+.status-section {
+  margin-top: 15px;
+  padding-top: 15px;
+  border-top: 1px solid #333;
+}
+
+.status-section h5 {
+  margin: 0 0 10px 0;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
 }

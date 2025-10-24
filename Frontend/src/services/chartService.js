@@ -1,6 +1,23 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 class ChartService {
+  // Centralized error handler for API responses
+  async handleApiResponse(response) {
+    if (response.status === 401) {
+      console.error('🔒 Unauthorized - token expired or invalid');
+      this.clearInvalidToken();
+      throw new Error('Authentication failed. Please log in again.');
+    }
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('❌ API Error:', response.status, response.statusText, errorText);
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    return response;
+  }
+
   // Get all charts for the current user
   async getCharts() {
     try {
@@ -13,13 +30,7 @@ class ChartService {
         },
       });
       
-      if (!response.ok) {
-        console.error('❌ API Error:', response.status, response.statusText);
-        const errorText = await response.text();
-        console.error('Error details:', errorText);
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
+      await this.handleApiResponse(response);
       return await response.json();
     } catch (error) {
       console.error('Error fetching charts:', error);
@@ -205,48 +216,62 @@ class ChartService {
     localStorage.removeItem('token');
     console.log('🧹 Token cleared. Please log in again.');
     
-    // Optionally redirect to login page
+    // Show alert to user
+    alert('Your session has expired. Please log in again.');
+    
+    // Redirect to login page
     if (window.location.pathname !== '/login') {
       console.log('🔄 Redirecting to login page...');
       window.location.href = '/login';
     }
   }
 
+  // Check if token is expired and handle accordingly
+  checkTokenExpiration() {
+    const token = localStorage.getItem('token');
+    
+    if (!token) {
+      console.error('❌ NO TOKEN FOUND! You need to log in.');
+      this.clearInvalidToken();
+      return false;
+    }
+    
+    try {
+      // Try to decode JWT token to check if it's valid
+      const parts = token.split('.');
+      if (parts.length !== 3) {
+        console.error('❌ Invalid JWT format - should have 3 parts separated by dots');
+        this.clearInvalidToken();
+        return false;
+      }
+      
+      const payload = JSON.parse(atob(parts[1]));
+      const isExpired = Date.now() > payload.exp * 1000;
+      
+      if (isExpired) {
+        console.error('❌ TOKEN IS EXPIRED! You need to log in again.');
+        this.clearInvalidToken();
+        return false;
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('❌ Token format invalid:', error);
+      this.clearInvalidToken();
+      return false;
+    }
+  }
+
   // Helper method to get auth token (implement based on your auth system)
   getAuthToken() {
+    // Check token expiration first
+    if (!this.checkTokenExpiration()) {
+      return '';
+    }
+    
     // This should return the JWT token from localStorage or your auth context
     const token = localStorage.getItem('token') || '';
     console.log('🔑 Retrieved token from localStorage:', token ? `${token.substring(0, 20)}...` : 'No token found');
-    console.log('🔑 Full localStorage keys:', Object.keys(localStorage));
-    
-    // Validate token format
-    if (token) {
-      try {
-        // Try to decode JWT token to check if it's valid
-        const parts = token.split('.');
-        if (parts.length !== 3) {
-          console.error('❌ Invalid JWT format - should have 3 parts separated by dots');
-          return '';
-        }
-        
-        const payload = JSON.parse(atob(parts[1]));
-        console.log('🔑 Token payload:', payload);
-        console.log('🔑 Token expires at:', new Date(payload.exp * 1000));
-        console.log('🔑 Current time:', new Date());
-        console.log('🔑 Token is expired:', Date.now() > payload.exp * 1000);
-        
-        if (Date.now() > payload.exp * 1000) {
-          console.error('❌ TOKEN IS EXPIRED! You need to log in again.');
-          console.log('💡 Solution: Go to login page and log in again');
-        }
-      } catch (error) {
-        console.error('❌ Token format invalid:', error);
-        console.log('💡 Solution: Clear localStorage and log in again');
-      }
-    } else {
-      console.error('❌ NO TOKEN FOUND! You need to log in.');
-      console.log('💡 Solution: Go to login page and log in');
-    }
     
     return token;
   }
@@ -284,6 +309,119 @@ class ChartService {
       throw error;
     }
   }
+
+  // Place a market sell order
+  async placeMarketSellOrder(symbol, quantity = 1) {
+    try {
+      console.log('🔍 ChartService.placeMarketSellOrder called with:', { symbol, quantity });
+      console.log('🔍 ChartService instance:', this);
+      console.log('🔍 ChartService getAuthToken method:', typeof this.getAuthToken);
+      
+      const token = this.getAuthToken();
+      console.log('🛒 Placing market sell order:', { symbol, quantity });
+      console.log('🔑 Auth token retrieved:', token ? `${token.substring(0, 20)}...` : 'No token');
+      
+      const response = await fetch(`${API_BASE_URL}/orders/market-sell`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          symbol: symbol,
+          quantity: quantity
+        })
+      });
+      
+      if (!response.ok) {
+        console.error('❌ Order API Error:', response.status, response.statusText);
+        const errorData = await response.json();
+        console.error('Error details:', errorData);
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      console.log('✅ Sell order placed successfully:', result);
+      return result;
+    } catch (error) {
+      console.error('Error placing market sell order:', error);
+      throw error;
+    }
+  }
+
+  // Get IB connection status
+  async getIBStatus() {
+    try {
+      const token = this.getAuthToken();
+      console.log('🔗 Checking IB connection status...');
+      
+      const response = await fetch(`${API_BASE_URL}/udf/ibkr-status`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      
+      if (!response.ok) {
+        console.error('❌ IB Status API Error:', response.status, response.statusText);
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      console.log('✅ IB status fetched:', result);
+      return result;
+    } catch (error) {
+      console.error('Error fetching IB status:', error);
+      throw error;
+    }
+  }
+
+  // Get real-time market data for a symbol
+  async getMarketData(symbol) {
+    try {
+      const token = this.getAuthToken();
+      console.log('📊 Fetching real-time market data for:', symbol);
+      
+      // For now, return mock data until WebSocket is properly implemented
+      return {
+        symbol: symbol.toUpperCase(),
+        last: 263.45,
+        bid: 263.40,
+        ask: 263.50,
+        volume: 1500000,
+        time: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('Error fetching market data:', error);
+      throw error;
+    }
+  }
+
+  // Get real positions from IB account
+  async getPositions() {
+    try {
+      const token = this.getAuthToken();
+      console.log('📊 Fetching real positions from IB...');
+      
+      const response = await fetch(`${API_BASE_URL}/udf/positions`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      
+      if (!response.ok) {
+        console.error('❌ Positions API Error:', response.status, response.statusText);
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      console.log('✅ Real positions fetched:', result);
+      return result;
+    } catch (error) {
+      console.error('Error fetching positions:', error);
+      throw error;
+    }
+  }
+
 }
 
 export default new ChartService();

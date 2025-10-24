@@ -147,75 +147,60 @@ class Datafeed {
 
   async getRealBars(symbolInfo, resolution, from, to, onHistoryCallback, onErrorCallback) {
     try {
-      // Convert resolution to Polygon.io format
-      const resolutionMap = {
-        '1': '1min',
-        '5': '5min',
-        '15': '15min',
-        '30': '30min',
-        '60': '1hour',
-        '1D': '1day',
-        '1W': '1week',
-        '1M': '1month'
-      };
-
-      const polygonResolution = resolutionMap[resolution] || '1day';
+      console.log('🌐 Using our backend API for real-time data');
       
-      // Fix timestamp conversion - ensure we have valid numbers
-      console.log('🔧 Raw timestamps:', 'from', from, 'to', to);
-      console.log('🔧 Timestamp types:', typeof from, typeof to);
+      // Convert timestamps to seconds (our backend expects seconds)
+      const fromTimestamp = Math.floor(from);
+      const toTimestamp = Math.floor(to);
       
-      // Convert to valid dates
-      const fromDate = new Date(Number(from) * 1000);
-      const toDate = new Date(Number(to) * 1000);
+      console.log('🔧 Timestamps:', 'from', fromTimestamp, 'to', toTimestamp);
+      console.log('🔧 Dates:', new Date(fromTimestamp * 1000), 'to', new Date(toTimestamp * 1000));
       
-      console.log('🔧 Converted dates:', fromDate, toDate);
+      // Call our backend UDF endpoint
+      const backendUrl = `http://localhost:8000/udf/history?symbol=${symbolInfo.name}&from_timestamp=${fromTimestamp}&to_timestamp=${toTimestamp}&resolution=${resolution}`;
       
-      if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
-        throw new Error('Invalid timestamp conversion');
-      }
+      console.log('🌐 Fetching from our backend:', backendUrl);
       
-      const fromDateStr = fromDate.toISOString().split('T')[0];
-      const toDateStr = toDate.toISOString().split('T')[0];
-
-      // Using Polygon.io free API (no key required for basic data)
-      const url = `https://api.polygon.io/v2/aggs/ticker/${symbolInfo.name}/range/1/${polygonResolution}/${fromDateStr}/${toDateStr}?adjusted=true&sort=asc&limit=50000`;
-
-      console.log('🌐 Fetching from Polygon.io:', url);
-      
-      const response = await fetch(url);
+      const response = await fetch(backendUrl);
       const data = await response.json();
-
-      if (data.status === 'OK' && data.results) {
-        // Convert Polygon data to UDF format
-        const filteredData = data.results.map(bar => ({
-          time: Math.floor(bar.t / 1000), // Convert to seconds for UDF
-          open: bar.o,
-          high: bar.h,
-          low: bar.l,
-          close: bar.c,
-          volume: bar.v || 0,
-        }));
-
-        if (filteredData.length > 0) {
-          // Convert to UDF format with arrays
-          const udfData = this.convertToUDFFormat(filteredData);
-          console.log('UDF Data format from API:', udfData);
-          
-          // Convert back to TradingView format for onHistoryCallback
-          const bars = this.convertToTradingViewFormat(filteredData);
-
-          onHistoryCallback(bars, { noData: false });
-          this.lastBar[symbolInfo.name] = bars[bars.length - 1];
-        } else {
-          onHistoryCallback([], { noData: true });
-        }
-      } else {
-        console.warn('No data from Polygon.io, falling back to mock data');
-        this.getMockBars(symbolInfo, resolution, from, to, onHistoryCallback, onErrorCallback);
+      
+      console.log('📊 Backend response:', data);
+      
+      if (data.s === 'error') {
+        throw new Error(data.errmsg || 'Backend error');
       }
+      
+      if (!data.t || !data.c || !data.o || !data.h || !data.l) {
+        throw new Error('Invalid data format from backend');
+      }
+      
+      // Convert backend data to TradingView format
+      const bars = data.t.map((time, index) => ({
+        time: time * 1000, // Convert to milliseconds for TradingView
+        open: data.o[index],
+        high: data.h[index],
+        low: data.l[index],
+        close: data.c[index],
+        volume: data.v ? data.v[index] : 0,
+      }));
+      
+      console.log('📊 Processed bars:', bars.length, 'bars');
+      if (bars.length > 0) {
+        console.log('📊 First bar:', new Date(bars[0].time));
+        console.log('📊 Last bar:', new Date(bars[bars.length - 1].time));
+      }
+      
+      if (bars.length > 0) {
+        onHistoryCallback(bars, { noData: false });
+        this.lastBar[symbolInfo.name] = bars[bars.length - 1];
+        console.log('✅ Successfully loaded', bars.length, 'bars for', symbolInfo.name);
+      } else {
+        onHistoryCallback([], { noData: true });
+        console.log('⚠️ No data available for', symbolInfo.name);
+      }
+      
     } catch (error) {
-      console.error('Error fetching real data:', error);
+      console.error('❌ Error getting real bars:', error);
       console.log('Falling back to mock data');
       this.getMockBars(symbolInfo, resolution, from, to, onHistoryCallback, onErrorCallback);
     }
@@ -230,17 +215,35 @@ class Datafeed {
       onResetCacheNeededCallback,
     };
 
-    // Simulate real-time updates (for demonstration)
-    const intervalId = setInterval(() => {
-      if (this.lastBar[symbolInfo.name]) {
-        const lastBar = { ...this.lastBar[symbolInfo.name] };
-        lastBar.close = lastBar.close + (Math.random() * 2 - 1); // Simulate price change
-        lastBar.high = Math.max(lastBar.high, lastBar.close);
-        lastBar.low = Math.min(lastBar.low, lastBar.close);
-        lastBar.volume = lastBar.volume + Math.floor(Math.random() * 100000);
-        lastBar.time = Date.now(); // New timestamp for real-time
-        onRealtimeCallback(lastBar);
-        this.lastBar[symbolInfo.name] = lastBar;
+    // Fetch real-time updates from our backend every 5 seconds
+    const intervalId = setInterval(async () => {
+      try {
+        // Get recent data from backend (last 5 minutes)
+        const now = Math.floor(Date.now() / 1000);
+        const fromTimestamp = now - 300; // 5 minutes ago
+        
+        const backendUrl = `http://localhost:8000/udf/history?symbol=${symbolInfo.name}&from_timestamp=${fromTimestamp}&to_timestamp=${now}&resolution=${resolution}`;
+        
+        const response = await fetch(backendUrl);
+        const data = await response.json();
+        
+        if (data.s === 'ok' && data.t && data.t.length > 0) {
+          // Get the latest bar
+          const latestBar = {
+            time: data.t[data.t.length - 1] * 1000, // Convert to milliseconds
+            open: data.o[data.o.length - 1],
+            high: data.h[data.h.length - 1],
+            low: data.l[data.l.length - 1],
+            close: data.c[data.c.length - 1],
+            volume: data.v ? data.v[data.v.length - 1] : 0,
+          };
+          
+          console.log('📊 Real-time update:', latestBar);
+          onRealtimeCallback(latestBar);
+          this.lastBar[symbolInfo.name] = latestBar;
+        }
+      } catch (error) {
+        console.error('❌ Error fetching real-time data:', error);
       }
     }, 5000); // Update every 5 seconds
 
