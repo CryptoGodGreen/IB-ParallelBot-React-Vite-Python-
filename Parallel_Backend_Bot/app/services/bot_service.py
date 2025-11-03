@@ -137,7 +137,8 @@ class BotService:
         # Check for price crossings
         await self._check_price_crossings(bot_id, price)
         
-        # Check for hard stop-out conditions
+        # Check for soft stop and hard stop conditions
+        await self._check_soft_stop_out(bot_id, price)
         await self._check_hard_stop_out(bot_id, price)
         
         # Update database
@@ -160,11 +161,45 @@ class BotService:
                 
                 # Get trend strategy and real line data from UserChart
                 from app.db.models import UserChart
+                from app.models.bot_config import BotConfiguration
+                
                 config_result = await session.execute(
                     select(UserChart).where(UserChart.id == bot.config_id)
                 )
                 config = config_result.scalar_one_or_none()
                 trend_strategy = config.trend_strategy if config else "uptrend"
+                multi_buy = config.multi_buy if config else "disabled"
+                interval = config.interval if config else "1M"  # Get interval from chart config
+                
+                # Get bot configuration settings (global settings)
+                bot_config_result = await session.execute(
+                    select(BotConfiguration).order_by(BotConfiguration.id.desc()).limit(1)
+                )
+                bot_config = bot_config_result.scalar_one_or_none()
+                
+                # Determine which interval settings to use (5m, 15m, or 1h)
+                soft_stop_pct = 5.0
+                soft_stop_minutes = 5
+                hard_stop_pct = 5.0
+                
+                if bot_config:
+                    # Normalize interval to determine which settings to use
+                    interval_upper = interval.upper()
+                    if '5M' in interval_upper or interval_upper == '5':
+                        soft_stop_pct = float(bot_config.stop_loss_5m) if bot_config.stop_loss_5m else 5.0
+                        soft_stop_minutes = bot_config.stop_loss_minutes_5m or 5
+                        hard_stop_pct = float(bot_config.hard_stop_5m) if bot_config.hard_stop_5m else 5.0
+                    elif '15M' in interval_upper or interval_upper == '15':
+                        soft_stop_pct = float(bot_config.stop_loss_15m) if bot_config.stop_loss_15m else 5.0
+                        soft_stop_minutes = bot_config.stop_loss_minutes_15m or 5
+                        hard_stop_pct = float(bot_config.hard_stop_15m) if bot_config.hard_stop_15m else 5.0
+                    elif '1H' in interval_upper or interval_upper == '60' or interval_upper == '1H':
+                        soft_stop_pct = float(bot_config.stop_loss_1h) if bot_config.stop_loss_1h else 5.0
+                        soft_stop_minutes = bot_config.stop_loss_minutes_1h or 5
+                        hard_stop_pct = float(bot_config.hard_stop_1h) if bot_config.hard_stop_1h else 5.0
+                
+                logger.info(f"🎯 Bot {bot_id}: trend_strategy={trend_strategy}, multi_buy={multi_buy}, interval={interval}")
+                logger.info(f"🎯 Bot {bot_id}: Soft stop: {soft_stop_pct}%, Timer: {soft_stop_minutes}min, Hard stop: {hard_stop_pct}%")
                 
                 # Extract real line data from layout_data
                 real_entry_lines = []
@@ -219,18 +254,35 @@ class BotService:
                                             })
                                             line_counter += 1
                     
-                    # For UPTREND: Sort upward lines and assign bottom as entry, higher as exits
+                    # For UPTREND: Sort upward lines and assign based on multi-buy setting
                     if trend_strategy == 'uptrend' and upward_lines:
                         # Sort upward lines by price (lowest to highest)
                         upward_lines.sort(key=lambda x: x['price'])
+                        logger.info(f"🎯 Bot {bot_id}: Sorted {len(upward_lines)} upward lines, multi_buy={multi_buy}")
                         
-                        # Bottom line = Entry line
-                        if upward_lines:
-                            real_entry_lines.append(upward_lines[0])
-                        
-                        # Higher lines = Exit lines
-                        for i in range(1, len(upward_lines)):
-                            real_exit_lines.append(upward_lines[i])
+                        if multi_buy == 'enabled':
+                            # Multi-buy mode: Bottom 2 lines = Entry, Higher lines = Exit
+                            logger.info(f"🎯 Bot {bot_id}: Multi-buy ENABLED - assigning bottom 2 lines as entry")
+                            if len(upward_lines) >= 2:
+                                real_entry_lines.append(upward_lines[0])  # 1st buy line
+                                real_entry_lines.append(upward_lines[1])  # 2nd buy line
+                                logger.info(f"🎯 Bot {bot_id}: Added entry lines at ${upward_lines[0]['price']:.2f} and ${upward_lines[1]['price']:.2f}")
+                                
+                            # All higher lines = Exit lines
+                            for i in range(2, len(upward_lines)):
+                                real_exit_lines.append(upward_lines[i])
+                                logger.info(f"🎯 Bot {bot_id}: Added exit line at ${upward_lines[i]['price']:.2f}")
+                        else:
+                            # Single buy mode: Bottom line = Entry, Higher lines = Exit
+                            logger.info(f"🎯 Bot {bot_id}: Multi-buy DISABLED - assigning bottom 1 line as entry")
+                            if upward_lines:
+                                real_entry_lines.append(upward_lines[0])
+                                logger.info(f"🎯 Bot {bot_id}: Added entry line at ${upward_lines[0]['price']:.2f}")
+                            
+                            # All higher lines = Exit lines
+                            for i in range(1, len(upward_lines)):
+                                real_exit_lines.append(upward_lines[i])
+                                logger.info(f"🎯 Bot {bot_id}: Added exit line at ${upward_lines[i]['price']:.2f}")
                     
                     logger.info(f"🎯 Extracted {len(real_entry_lines)} entry lines and {len(real_exit_lines)} exit lines from layout_data")
                 
@@ -241,6 +293,7 @@ class BotService:
                     'symbol': bot.symbol,
                     'name': bot.name,
                     'trend_strategy': trend_strategy,  # Add trend strategy
+                    'multi_buy': multi_buy,  # Multi-buy mode
                     'is_active': bot.is_active,
                     'is_running': bot.is_running,
                     'is_bought': bot.is_bought,
@@ -257,8 +310,14 @@ class BotService:
                     'exit_lines': real_exit_lines,
                     'original_exit_lines_count': len(real_exit_lines),  # Store original count for position splitting
                     'crossed_lines': set(),  # Track crossed lines
-                    'bot_hard_stop_out': float(config.bot_hard_stop_out) if config and config.bot_hard_stop_out else 5.0,  # Hard stop-out percentage (default 5%)
+                    'interval': interval,  # Store interval for reference
+                    'soft_stop_pct': soft_stop_pct,  # Soft stop percentage
+                    'soft_stop_minutes': soft_stop_minutes,  # Soft stop timer duration in minutes
+                    'hard_stop_pct': hard_stop_pct,  # Hard stop percentage (from global config)
+                    'bot_hard_stop_out': hard_stop_pct,  # Use global hard stop instead of individual bot config
                     'hard_stop_triggered': False,  # Track if hard stop-out was triggered
+                    'soft_stop_timer_start': None,  # Timestamp when soft stop timer started (None if not active)
+                    'soft_stop_timer_active': False,  # Whether soft stop timer is currently running
                     # Order tracking fields
                     'entry_order_id': bot.entry_order_id,
                     'entry_order_status': bot.entry_order_status,
@@ -410,11 +469,19 @@ class BotService:
         previous_price = bot_state.get('previous_price', current_price)
         
         # Check entry lines (upward crossing or current price above entry)
-        if not bot_state['is_bought']:
+        # In multi-buy mode, continue checking until all entry lines are crossed
+        if not bot_state['is_bought'] or bot_state.get('multi_buy') == 'enabled':
+            # Count how many entry lines have been crossed
+            crossed_entry_count = sum(1 for entry_line in bot_state['entry_lines'] 
+                                     if entry_line['id'] in bot_state['crossed_lines'])
+            
             for line in bot_state['entry_lines']:
+                # Skip if already crossed (unless it's the last entry line to complete position)
+                if line['id'] in bot_state['crossed_lines']:
+                    continue
+                
                 # Check for upward crossing: previous_price < line_price <= current_price
-                if (previous_price < line['price'] <= current_price and 
-                    line['id'] not in bot_state['crossed_lines']):
+                if previous_price < line['price'] <= current_price:
                     
                     logger.info(f"🤖 Bot {bot_id}: ENTRY CROSSING DETECTED! "
                               f"Line: ${line['price']}, Current: ${current_price}")
@@ -423,8 +490,7 @@ class BotService:
                     bot_state['crossed_lines'].add(line['id'])
                 
                 # Fallback: If current price is above entry line and no crossing detected yet
-                elif (current_price > line['price'] and 
-                      line['id'] not in bot_state['crossed_lines']):
+                elif current_price > line['price']:
                     
                     logger.info(f"🤖 Bot {bot_id}: ENTRY PRICE ABOVE LINE! "
                               f"Line: ${line['price']}, Current: ${current_price}")
@@ -801,6 +867,144 @@ class BotService:
         except Exception as e:
             logger.error(f"Error placing stop-loss order for bot {bot_id}: {e}")
         
+    async def _check_soft_stop_out(self, bot_id: int, current_price: float):
+        """Check for soft stop-out conditions with timer and execute sell if timer expires"""
+        try:
+            bot_state = self.active_bots[bot_id]
+            
+            # Only check if bot has bought shares
+            if not bot_state['is_bought'] or bot_state['open_shares'] <= 0:
+                # Reset timer if position is closed
+                bot_state['soft_stop_timer_start'] = None
+                bot_state['soft_stop_timer_active'] = False
+                return
+            
+            entry_price = bot_state.get('entry_price', 0)
+            if entry_price <= 0:
+                return  # No valid entry price
+            
+            # Convert entry_price to float
+            entry_price = float(entry_price)
+            
+            # Get soft stop and hard stop percentages
+            soft_stop_pct = bot_state.get('soft_stop_pct', 5.0)
+            hard_stop_pct = bot_state.get('hard_stop_pct', 5.0)
+            soft_stop_minutes = bot_state.get('soft_stop_minutes', 5)
+            
+            # Calculate stop prices
+            soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
+            hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
+            
+            # Check if price goes below hard stop - this takes priority
+            if current_price <= hard_stop_price:
+                # Hard stop takes priority - reset soft stop timer (hard stop handler will sell)
+                bot_state['soft_stop_timer_start'] = None
+                bot_state['soft_stop_timer_active'] = False
+                return
+            
+            # Check if price is below soft stop
+            if current_price <= soft_stop_price:
+                # Price is below soft stop - start or continue timer
+                if not bot_state['soft_stop_timer_active']:
+                    # Start the timer
+                    bot_state['soft_stop_timer_start'] = time.time()
+                    bot_state['soft_stop_timer_active'] = True
+                    logger.info(f"⏱️ Bot {bot_id}: SOFT STOP TIMER STARTED - "
+                              f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}, "
+                              f"Soft stop: ${soft_stop_price:.2f} ({soft_stop_pct}%), "
+                              f"Timer: {soft_stop_minutes} minutes")
+                
+                # Check if timer has expired
+                if bot_state['soft_stop_timer_active'] and bot_state['soft_stop_timer_start']:
+                    elapsed_minutes = (time.time() - bot_state['soft_stop_timer_start']) / 60
+                    
+                    if elapsed_minutes >= soft_stop_minutes:
+                        # Timer expired - sell position
+                        logger.warning(f"⏱️ Bot {bot_id}: SOFT STOP TIMER EXPIRED! "
+                                     f"Price stayed below soft stop for {elapsed_minutes:.1f} minutes. "
+                                     f"Selling position...")
+                        
+                        # Execute soft stop sell
+                        await self._execute_soft_stop_sell(bot_id, current_price)
+            else:
+                # Price is above soft stop - reset timer
+                if bot_state['soft_stop_timer_active']:
+                    logger.info(f"⏱️ Bot {bot_id}: SOFT STOP TIMER RESET - "
+                              f"Price recovered above soft stop: ${current_price:.2f} > ${soft_stop_price:.2f}")
+                    bot_state['soft_stop_timer_start'] = None
+                    bot_state['soft_stop_timer_active'] = False
+                    
+        except Exception as e:
+            logger.error(f"Error checking soft stop-out for bot {bot_id}: {e}")
+    
+    async def _execute_soft_stop_sell(self, bot_id: int, current_price: float):
+        """Execute market sell due to soft stop timer expiry"""
+        try:
+            bot_state = self.active_bots[bot_id]
+            shares_to_sell = bot_state['open_shares']
+            
+            if shares_to_sell <= 0:
+                return
+                
+            logger.warning(f"⏱️ Bot {bot_id}: Executing SOFT STOP SELL of {shares_to_sell} shares at ${current_price:.2f}")
+            
+            # Place market sell order
+            from app.utils.ib_client import ib_client
+            from ib_async import MarketOrder
+            
+            # Get contract
+            contract = await ib_client.qualify_stock(bot_state['symbol'])
+            if not contract:
+                logger.error(f"❌ Bot {bot_id}: Could not get contract for {bot_state['symbol']}")
+                return
+            
+            # Place market sell order
+            order = MarketOrder("SELL", shares_to_sell)
+            trade = await ib_client.place_order(contract, order)
+            
+            if trade and trade.order:
+                logger.warning(f"⏱️ Bot {bot_id}: SOFT STOP ORDER PLACED - Order ID: {trade.order.orderId}")
+                
+                # Update bot state - sell all remaining shares and stop the bot
+                bot_state['shares_exited'] += shares_to_sell
+                bot_state['open_shares'] = 0
+                bot_state['is_bought'] = False
+                bot_state['is_active'] = False  # Stop the bot
+                bot_state['is_running'] = False  # Stop running
+                bot_state['status'] = 'SOFT_STOPPED_OUT'  # Set status
+                bot_state['soft_stop_timer_start'] = None  # Clear timer
+                bot_state['soft_stop_timer_active'] = False  # Clear timer flag
+                
+                # Update database
+                await self._update_bot_in_db(bot_id, {
+                    'is_bought': False,
+                    'is_active': False,
+                    'is_running': False,
+                    'shares_exited': bot_state['shares_exited'],
+                    'open_shares': 0,
+                    'status': 'SOFT_STOPPED_OUT'
+                })
+                
+                # Log event
+                await self._log_bot_event(bot_id, 'soft_stop_sell', {
+                    'current_price': current_price,
+                    'shares_sold': shares_to_sell,
+                    'order_id': trade.order.orderId if trade.order else None,
+                    'reason': 'soft_stop_timer_expired'
+                })
+                
+                logger.warning(f"⏱️ Bot {bot_id}: SOFT STOP COMPLETED - All shares sold")
+                
+                # Remove bot from active bots since it's stopped
+                if bot_id in self.active_bots:
+                    del self.active_bots[bot_id]
+                    logger.info(f"⏱️ Bot {bot_id}: Removed from active bots due to soft stop-out")
+            else:
+                logger.error(f"❌ Bot {bot_id}: Failed to place soft stop sell order")
+                
+        except Exception as e:
+            logger.error(f"Error executing soft stop sell for bot {bot_id}: {e}")
+    
     async def _check_hard_stop_out(self, bot_id: int, current_price: float):
         """Check for hard stop-out conditions and execute emergency sell"""
         try:
@@ -810,10 +1014,11 @@ class BotService:
             if not bot_state['is_bought'] or bot_state['open_shares'] <= 0:
                 return
                 
-            hard_stop_out_pct = bot_state.get('bot_hard_stop_out', 0.0)
-            if hard_stop_out_pct <= 0:
+            # Use hard stop from global config (already loaded in bot state)
+            hard_stop_pct = bot_state.get('hard_stop_pct', bot_state.get('bot_hard_stop_out', 0.0))
+            if hard_stop_pct <= 0:
                 return  # No hard stop-out configured
-                
+            
             entry_price = bot_state.get('entry_price', 0)
             if entry_price <= 0:
                 return  # No valid entry price
@@ -822,13 +1027,17 @@ class BotService:
             entry_price = float(entry_price)
             
             # Calculate stop-out price (entry price - stop-out percentage)
-            stop_out_price = entry_price * (1 - hard_stop_out_pct / 100)
+            stop_out_price = entry_price * (1 - hard_stop_pct / 100)
             
             # Check if current price has dropped below stop-out price
             if current_price <= stop_out_price:
                 logger.warning(f"🚨 Bot {bot_id}: HARD STOP-OUT TRIGGERED! "
                               f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}, "
-                              f"Stop-out: ${stop_out_price:.2f} ({hard_stop_out_pct}%)")
+                              f"Stop-out: ${stop_out_price:.2f} ({hard_stop_pct}%)")
+                
+                # Reset soft stop timer (hard stop takes priority)
+                bot_state['soft_stop_timer_start'] = None
+                bot_state['soft_stop_timer_active'] = False
                 
                 # Execute emergency sell of all remaining shares
                 await self._execute_hard_stop_out_sell(bot_id, current_price)
@@ -937,51 +1146,93 @@ class BotService:
             # Import MarketOrder
             from ib_async import MarketOrder
             
-            # Place market buy order (immediate execution at current market price)
+            # Check if multi-buy mode is enabled
+            if bot_state.get('multi_buy') == 'enabled' and len(bot_state.get('entry_lines', [])) >= 2:
+                # Multi-buy mode: Place incremental orders as price crosses each level
+                await self._execute_multi_buy_entry_trade(bot_id, line, current_price)
+                return
+            
+            # Single buy mode: Place single market buy order
             order = MarketOrder("BUY", bot_state['position_size'])
             trade = await ib_client.place_order(contract, order)
             
             if trade:
                 logger.info(f"✅ Bot {bot_id}: MARKET BUY ORDER PLACED - Order ID: {trade.order.orderId}")
                 
-                # Market orders are executed immediately, so update bot state right away
-                bot_state['is_bought'] = True
-                bot_state['entry_price'] = current_price
-                bot_state['shares_entered'] = bot_state['position_size']
-                bot_state['open_shares'] = bot_state['position_size']
+                # Track position accumulation
+                shares_to_add = bot_state['position_size']
+                
+                if bot_state.get('multi_buy') == 'enabled' and len(bot_state.get('entry_lines', [])) >= 2:
+                    # Multi-buy mode: Accumulate shares as we cross each entry line
+                    if 'shares_entered' not in bot_state:
+                        bot_state['shares_entered'] = 0
+                        bot_state['open_shares'] = 0
+                        bot_state['entry_price'] = 0
+                    
+                    # Add shares for this crossing
+                    bot_state['shares_entered'] += shares_to_add
+                    bot_state['open_shares'] += shares_to_add
+                    
+                    # Calculate average entry price
+                    total_cost = (bot_state['entry_price'] * (bot_state['shares_entered'] - shares_to_add)) + (current_price * shares_to_add)
+                    bot_state['entry_price'] = total_cost / bot_state['shares_entered'] if bot_state['shares_entered'] > 0 else current_price
+                    
+                    # Check if all entry lines are crossed (position complete)
+                    total_entry_lines = len(bot_state.get('entry_lines', []))
+                    crossed_entry_lines = sum(1 for entry_line in bot_state['entry_lines'] 
+                                             if entry_line['id'] in bot_state['crossed_lines'])
+                    
+                    if crossed_entry_lines >= total_entry_lines:
+                        bot_state['is_bought'] = True
+                        logger.info(f"🤖 Bot {bot_id}: All entry lines crossed! Position complete: {bot_state['shares_entered']} shares @ ${bot_state['entry_price']:.2f}")
+                        
+                        # Place stop-loss order
+                        await self._place_stop_loss_order(bot_id, current_price, bot_state['shares_entered'])
+                        
+                        # Create exit limit orders for all exit lines immediately
+                        await self._create_exit_orders_on_position_open(bot_id, current_price)
+                    else:
+                        logger.info(f"🤖 Bot {bot_id}: Accumulating position: {bot_state['shares_entered']} shares so far (crossed {crossed_entry_lines}/{total_entry_lines} entry lines)")
+                else:
+                    # Single buy mode: Execute immediately
+                    bot_state['is_bought'] = True
+                    bot_state['entry_price'] = current_price
+                    bot_state['shares_entered'] = bot_state['position_size']
+                    bot_state['open_shares'] = bot_state['position_size']
+                    
+                    # Place stop-loss order
+                    await self._place_stop_loss_order(bot_id, current_price, bot_state['position_size'])
+                    
+                    # Create exit limit orders for all exit lines immediately
+                    await self._create_exit_orders_on_position_open(bot_id, current_price)
+                
                 bot_state['entry_order_id'] = trade.order.orderId
                 bot_state['entry_order_status'] = 'FILLED'
                 bot_state['entry_order_price'] = current_price
                 bot_state['entry_order_quantity'] = bot_state['position_size']
                 
                 # Update database
-                logger.info(f"🔄 Bot {bot_id}: Updating database with shares_entered={bot_state['position_size']}, open_shares={bot_state['position_size']}")
+                logger.info(f"🔄 Bot {bot_id}: Updating database with shares_entered={bot_state.get('shares_entered', bot_state['position_size'])}, open_shares={bot_state.get('open_shares', bot_state['position_size'])}")
                 await self._update_bot_in_db(bot_id, {
-                    'is_bought': True,
-                    'entry_price': current_price,
-                    'shares_entered': bot_state['position_size'],
-                    'open_shares': bot_state['position_size'],
+                    'is_bought': bot_state.get('is_bought', False),
+                    'entry_price': bot_state.get('entry_price', current_price),
+                    'shares_entered': bot_state.get('shares_entered', bot_state['position_size']),
+                    'open_shares': bot_state.get('open_shares', bot_state['position_size']),
                     'entry_order_id': trade.order.orderId,
                     'entry_order_status': 'FILLED'
                 })
                 logger.info(f"✅ Bot {bot_id}: Database updated successfully")
                 
-                logger.info(f"🤖 Bot {bot_id}: MARKET BUY EXECUTED - {bot_state['position_size']} shares at ${current_price}")
+                logger.info(f"🤖 Bot {bot_id}: MARKET BUY EXECUTED - {shares_to_add} shares at ${current_price}")
                 
                 # Log event
                 await self._log_bot_event(bot_id, 'spot_position_opened', {
                     'line_price': line['price'],
                     'current_price': current_price,
-                    'shares_bought': bot_state['position_size'],
+                    'shares_bought': shares_to_add,
                     'order_id': trade.order.orderId,
                     'strategy': 'uptrend_spot_market'
                 })
-                
-                # Place stop-loss order
-                await self._place_stop_loss_order(bot_id, current_price, bot_state['position_size'])
-                
-                # Create exit limit orders for all exit lines immediately
-                await self._create_exit_orders_on_position_open(bot_id, current_price)
             else:
                 logger.error(f"❌ Bot {bot_id}: Failed to place entry market order")
             
@@ -1363,12 +1614,21 @@ class BotService:
             try:
                 # Update bot statuses in database
                 for bot_id, bot_state in self.active_bots.items():
+                    # Ensure open_shares is calculated correctly
+                    shares_entered = bot_state.get('shares_entered', 0)
+                    shares_exited = bot_state.get('shares_exited', 0)
+                    open_shares = max(0, shares_entered - shares_exited)
+                    
+                    # Sync the calculated value back to bot_state if it's wrong
+                    if bot_state.get('open_shares', 0) != open_shares:
+                        bot_state['open_shares'] = open_shares
+                    
                     await self._update_bot_in_db(bot_id, {
                         'current_price': bot_state['current_price'],
                         'is_bought': bot_state['is_bought'],
-                        'open_shares': bot_state['open_shares'],
-                        'shares_entered': bot_state.get('shares_entered', 0),
-                        'shares_exited': bot_state.get('shares_exited', 0)
+                        'open_shares': open_shares,
+                        'shares_entered': shares_entered,
+                        'shares_exited': shares_exited
                     })
                     
                 await asyncio.sleep(30)  # Update every 30 seconds
@@ -1496,7 +1756,9 @@ class BotService:
                 open_shares = bot_state.get('open_shares', 0)
                 shares_entered = bot_state.get('shares_entered', 0)
                 shares_exited = bot_state.get('shares_exited', 0)
+                position_size = bot_state.get('position_size', 0)
                 
+                # Priority 1: Check if fully sold first
                 if open_shares <= 0:
                     position_status = "SOLD_100%"
                 elif shares_exited > 0:
@@ -1530,6 +1792,23 @@ class BotService:
                     
                     # Debug logging for percentage calculation
                     logger.debug(f"🔍 Bot {bot_id}: Position calculation - shares_entered={shares_entered}, shares_exited={shares_exited}, open_shares={open_shares}, total_exit_lines={total_exit_lines}, exit_lines_hit={exit_lines_hit}, bot_status={bot_status}")
+                # Priority 3: Check if multi-buy mode and partially filled (before checking for full BOUGHT)
+                elif bot_state.get('multi_buy') == 'enabled' and shares_entered > 0 and position_size > 0 and shares_exited == 0:
+                    buy_percentage = (shares_entered / position_size) * 100
+                    # If we have partial position (not 100% bought yet)
+                    if buy_percentage < 100:
+                        if buy_percentage >= 87.5:
+                            position_status = "BUY_100%"
+                        elif buy_percentage >= 62.5:
+                            position_status = "BUY_75%"
+                        elif buy_percentage >= 37.5:
+                            position_status = "BUY_50%"
+                        elif buy_percentage >= 12.5:
+                            position_status = "BUY_25%"
+                        else:
+                            position_status = "BUY_25%"  # Minimum for any partial fill
+                    else:
+                        position_status = "BOUGHT"
                 else:
                     position_status = "BOUGHT"
             else:
@@ -1719,6 +1998,120 @@ class BotService:
             # Fallback to average price
             prices = [point['price'] for point in points]
             return sum(prices) / len(prices)
+    
+    async def _execute_multi_buy_entry_trade(self, bot_id: int, line, current_price: float):
+        """Execute single multi-buy order when price crosses one entry line (30/20/20/30 split)"""
+        try:
+            bot_state = self.active_bots[bot_id]
+            
+            if len(bot_state.get('entry_lines', [])) < 2:
+                logger.error(f"Bot {bot_id}: Multi-buy enabled but less than 2 entry lines found")
+                return
+            
+            entry_lines = bot_state['entry_lines']
+            second_line = entry_lines[0]  # Higher line (2nd buy line)
+            first_line = entry_lines[1]   # Lower line (1st buy line)
+            
+            # Calculate prices for the 4 entry points
+            second_price = self._calculate_trend_line_price(second_line['points'])
+            first_price = self._calculate_trend_line_price(first_line['points'])
+            
+            # Calculate intermediate prices (1/3 and 2/3 of the way down from 2nd to 1st)
+            price_diff = second_price - first_price
+            third_price = second_price - (price_diff / 3)  # 1/3 way down
+            two_thirds_price = second_price - (2 * price_diff / 3)  # 2/3 way down
+            
+            # Calculate share amounts (30%, 20%, 20%, 30% of total)
+            total_shares = bot_state['position_size']
+            shares_at_second = int(total_shares * 0.30)
+            shares_at_third = int(total_shares * 0.20)
+            shares_at_two_thirds = int(total_shares * 0.20)
+            shares_at_first = total_shares - shares_at_second - shares_at_third - shares_at_two_thirds  # Remainder
+            
+            # Determine which order to place based on which line was crossed
+            # Initialize multi_buy_tracker if not exists
+            if 'multi_buy_tracker' not in bot_state:
+                bot_state['multi_buy_tracker'] = {
+                    'second_filled': False,
+                    'third_filled': False,
+                    'two_thirds_filled': False,
+                    'first_filled': False,
+                    'total_shares_bought': 0
+                }
+            
+            tracker = bot_state['multi_buy_tracker']
+            shares_to_buy = 0
+            
+            # Check which price level was crossed and place corresponding order
+            if line['id'] == second_line['id'] and not tracker['second_filled']:
+                # Price crossed 2nd entry line (highest)
+                shares_to_buy = shares_at_second
+                tracker['second_filled'] = True
+                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 2nd entry line - buying {shares_to_buy} shares (30%)")
+            elif current_price <= third_price and not tracker['third_filled']:
+                # Price reached 1/3 way down
+                shares_to_buy = shares_at_third
+                tracker['third_filled'] = True
+                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 1/3 level - buying {shares_to_buy} shares (20%)")
+            elif current_price <= two_thirds_price and not tracker['two_thirds_filled']:
+                # Price reached 2/3 way down
+                shares_to_buy = shares_at_two_thirds
+                tracker['two_thirds_filled'] = True
+                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 2/3 level - buying {shares_to_buy} shares (20%)")
+            elif line['id'] == first_line['id'] and not tracker['first_filled']:
+                # Price crossed 1st entry line (lowest)
+                shares_to_buy = shares_at_first
+                tracker['first_filled'] = True
+                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 1st entry line - buying {shares_to_buy} shares (30%)")
+            
+            if shares_to_buy == 0:
+                logger.info(f"🤖 Bot {bot_id}: Multi-buy order already placed for this crossing")
+                return
+            
+            # Place market order for this specific allocation
+            from ib_async import MarketOrder
+            contract = await ib_client.qualify_stock(bot_state['symbol'])
+            if not contract:
+                logger.error(f"Could not qualify {bot_state['symbol']}")
+                return
+            
+            order = MarketOrder("BUY", shares_to_buy)
+            trade = await ib_client.place_order(contract, order)
+            
+            if trade:
+                logger.info(f"✅ Bot {bot_id}: Multi-buy market order placed - {shares_to_buy} shares (Order ID: {trade.order.orderId})")
+                tracker['total_shares_bought'] += shares_to_buy
+                
+                # Update bot state
+                bot_state['shares_entered'] = tracker['total_shares_bought']
+                bot_state['open_shares'] = tracker['total_shares_bought']
+                
+                # If this is the first order, mark as bought
+                if tracker['total_shares_bought'] > 0:
+                    bot_state['is_bought'] = True
+                    if bot_state['entry_price'] == 0:
+                        bot_state['entry_price'] = current_price
+                
+                # Update database
+                await self._update_bot_in_db(bot_id, {
+                    'is_bought': bot_state['is_bought'],
+                    'shares_entered': bot_state['shares_entered'],
+                    'open_shares': bot_state['open_shares'],
+                    'entry_order_status': 'FILLED'
+                })
+                
+                # If all 4 orders are filled, create exit orders
+                if tracker['second_filled'] and tracker['third_filled'] and tracker['two_thirds_filled'] and tracker['first_filled']:
+                    logger.info(f"✅ Bot {bot_id}: All multi-buy orders placed ({tracker['total_shares_bought']} shares)")
+                    # Create exit limit orders for all exit lines
+                    await self._create_exit_orders_on_position_open(bot_id, current_price)
+                    # Place stop-loss order
+                    await self._place_stop_loss_order(bot_id, current_price, bot_state['position_size'])
+            else:
+                logger.error(f"❌ Bot {bot_id}: Failed to place multi-buy market order for {shares_to_buy} shares")
+            
+        except Exception as e:
+            logger.error(f"Error executing multi-buy entry trade for bot {bot_id}: {e}")
 
 # Global bot service instance
 bot_service = BotService()

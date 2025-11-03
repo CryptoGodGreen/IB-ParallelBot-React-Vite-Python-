@@ -3,10 +3,12 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes import health_router, cache_router, users_router, charts_router, orders_router, bot_router
+from app.routes.bot_config_router import router as bot_config_router
 from app.api.udf import router as udf_router
 from app.db.models import Base
 from app.models.market_data import Base as MarketDataBase
 from app.models.bot_models import Base as BotBase
+from app.models.bot_config import Base as BotConfigBase
 from app.db.postgres import engine, AsyncSessionLocal
 from app.controllers.user_controller import seed_admin
 from app.utils.ib_client import ib_client
@@ -60,6 +62,7 @@ app.include_router(users_router)
 app.include_router(charts_router)
 app.include_router(orders_router)
 app.include_router(bot_router)
+app.include_router(bot_config_router)
 app.include_router(udf_router)
 
 @app.on_event("startup")
@@ -68,6 +71,7 @@ async def startup():
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(MarketDataBase.metadata.create_all)
         await conn.run_sync(BotBase.metadata.create_all)
+        await conn.run_sync(BotConfigBase.metadata.create_all)
 
     async with AsyncSessionLocal() as db:
         await seed_admin(db)

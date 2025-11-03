@@ -42,6 +42,7 @@ class BotResponse(BaseModel):
     position_size: int
     max_position: int
     status: str  # Add status field
+    multi_buy: str  # Multi-buy mode
     created_at: str
     updated_at: str
 
@@ -172,6 +173,8 @@ async def get_bot_status(
                 open_shares=bot.open_shares or 0,
                 position_size=bot.position_size or 0,
                 max_position=bot.max_position or 0,
+                status=bot.status or 'ACTIVE',
+                multi_buy=bot.multi_buy or 'disabled',
                 created_at=bot.created_at.isoformat(),
                 updated_at=bot.updated_at.isoformat()
             )
@@ -181,6 +184,67 @@ async def get_bot_status(
     except Exception as e:
         logger.error(f"Error getting bot status {bot_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get bot status: {str(e)}")
+
+@router.get("/debug/{bot_id}")
+async def get_bot_debug_status(
+    bot_id: int,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Get detailed debug status including in-memory state"""
+    try:
+        from app.services.bot_service import bot_service
+        from app.db.postgres import AsyncSessionLocal
+        from sqlalchemy import select
+        from app.models.bot_models import BotInstance
+        
+        # Get from database
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(BotInstance).where(BotInstance.id == bot_id)
+            )
+            bot = result.scalar_one_or_none()
+            
+            if not bot:
+                raise HTTPException(status_code=404, detail="Bot not found")
+        
+        # Get in-memory state
+        bot_state = bot_service.active_bots.get(bot_id, {})
+        multi_buy_tracker = bot_state.get('multi_buy_tracker', {})
+        
+        return {
+            "database": {
+                "id": bot.id,
+                "config_id": bot.config_id,
+                "symbol": bot.symbol,
+                "is_bought": bot.is_bought,
+                "shares_entered": bot.shares_entered,
+                "shares_exited": bot.shares_exited,
+                "open_shares": bot.open_shares,
+                "position_size": bot.position_size,
+                "entry_price": float(bot.entry_price) if bot.entry_price else 0,
+                "multi_buy": bot.multi_buy,
+                "status": bot.status,
+            },
+            "in_memory": {
+                "is_bought": bot_state.get('is_bought', False),
+                "shares_entered": bot_state.get('shares_entered', 0),
+                "shares_exited": bot_state.get('shares_exited', 0),
+                "open_shares": bot_state.get('open_shares', 0),
+                "position_size": bot_state.get('position_size', 0),
+                "entry_price": bot_state.get('entry_price', 0),
+                "multi_buy": bot_state.get('multi_buy', 'disabled'),
+                "current_price": bot_state.get('current_price', 0),
+                "multi_buy_tracker": multi_buy_tracker,
+                "entry_lines_count": len(bot_state.get('entry_lines', [])),
+                "exit_lines_count": len(bot_state.get('exit_lines', [])),
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting bot debug status {bot_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get bot debug status: {str(e)}")
 
 @router.get("/list", response_model=List[BotResponse])
 async def list_bots(
@@ -213,6 +277,7 @@ async def list_bots(
                     position_size=bot.position_size or 0,
                     max_position=bot.max_position or 0,
                     status=bot.status or 'ACTIVE',  # Add status field with default
+                    multi_buy=bot.multi_buy or 'disabled',  # Add multi_buy field
                     created_at=bot.created_at.isoformat(),
                     updated_at=bot.updated_at.isoformat()
                 )

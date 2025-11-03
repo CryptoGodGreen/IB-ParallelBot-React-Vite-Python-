@@ -31,6 +31,7 @@ class BotInstance(Base):
     stop_loss_price = Column(DECIMAL(10, 2), nullable=True)
     hard_stop_triggered = Column(Boolean, default=False)
     status = Column(String(20), default='ACTIVE')  # ACTIVE, COMPLETED, STOPPED, ERROR
+    multi_buy = Column(String(20), default='disabled')  # Multi-buy mode (default disabled)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -76,6 +76,7 @@ class ChartDataBase(BaseModel):
     trend_strategy: TrendStrategy = TrendStrategy.uptrend  # Trading strategy
     layout_data: LayoutData # Using the new structured model
     bot_hard_stop_out: Optional[str] = "5"  # Hard stop-out percentage (default 5%)
+    multi_buy: Optional[str] = "disabled"  # Multi-buy mode (default disabled)
 
 class ChartCreate(ChartDataBase):
     """Schema for creating a new chart layout."""
@@ -91,6 +92,7 @@ class ChartUpdate(BaseModel):
     trend_strategy: Optional[TrendStrategy] = None  # Trading strategy
     layout_data: Optional[LayoutData] = None
     bot_hard_stop_out: Optional[str] = None  # Hard stop-out percentage
+    multi_buy: Optional[str] = None  # Multi-buy mode
 
 class ChartResponse(ChartDataBase):
     """Schema for returning chart data from the API."""

@@ -45,6 +45,7 @@ class UserChart(Base):
     trade_amount = Column(Numeric(10, 2), default=1000)  # Trade amount in USD
     trend_strategy = Column(Enum(TrendStrategy), default=TrendStrategy.uptrend, nullable=False)
     bot_hard_stop_out = Column(String, default="5")  # Hard stop-out percentage (default 5%)
+    multi_buy = Column(String, default="disabled")  # Multi-buy mode (default disabled)
     
     # layout_data will store line coordinates, TP/SL settings, etc.
     layout_data = Column(JSON, nullable=False)
