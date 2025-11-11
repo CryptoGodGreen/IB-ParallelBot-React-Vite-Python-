@@ -80,51 +80,74 @@ class IbInterface:
     async def retrieve_option_quote(self, symbol: str, strike_date: str, strike: float, right: str, tick_type: int = 1) -> float:
         """
         Retrieve option quote (like Ruby IbInterface.retrieve_option_quote)
+        Note: Redis handler is not implemented, so this will timeout quickly and return -1
         """
         request_id = asyncio.get_event_loop().time() * 1000000
+        pubsub = None
         
         try:
-            logger.info(f"📊 Requesting option quote for {symbol} {strike_date} {strike} {right}")
-            
-            request_data = {
-                'symbol': symbol,
-                'strike': strike,
-                'strike_date': strike_date,
-                'right': right,
-                'id': request_id
-            }
-            
-            self.redis.publish('option-quote-requests', json.dumps(request_data))
-            
-            # Subscribe to response
-            pubsub = self.redis.pubsub()
-            pubsub.subscribe(f'QUOTES-{request_id}')
-            
-            timeout = 10.0  # Like Ruby 10-second timeout
-            start_time = asyncio.get_event_loop().time()
-            
-            while True:
-                message = pubsub.get_message(timeout=0.1)
-                if message and message['type'] == 'message':
-                    data = json.loads(message['data'])
-                    
-                    if data.get('tick_type') == tick_type and 'price' in data:
-                        price = float(data['price'])
-                        logger.info(f"✅ Option quote for {symbol}: ${price}")
-                        return price
+            # Wrap entire operation in timeout to prevent hanging
+            async def _retrieve_with_timeout():
+                nonlocal pubsub
+                logger.info(f"📊 Requesting option quote for {symbol} {strike_date} {strike} {right}")
+                
+                request_data = {
+                    'symbol': symbol,
+                    'strike': strike,
+                    'strike_date': strike_date,
+                    'right': right,
+                    'id': request_id
+                }
+                
+                self.redis.publish('option-quote-requests', json.dumps(request_data))
+                
+                # Subscribe to response
+                pubsub = self.redis.pubsub()
+                pubsub.subscribe(f'QUOTES-{request_id}')
+                
+                timeout = 3.0  # Reduced to 3 seconds - Redis handler not implemented
+                start_time = asyncio.get_event_loop().time()
+                
+                while True:
+                    message = pubsub.get_message(timeout=0.1)
+                    if message and message['type'] == 'message':
+                        data = json.loads(message['data'])
+                        
+                        if data.get('tick_type') == tick_type and 'price' in data:
+                            price = float(data['price'])
+                            logger.info(f"✅ Option quote for {symbol}: ${price}")
+                            return price
                     
                     # Check timeout
                     if asyncio.get_event_loop().time() - start_time > timeout:
-                        logger.warning(f"⏰ Option quote request timeout for {symbol}")
-                        break
-                
-                await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
+                        logger.warning(f"⏰ Option quote request timeout for {symbol} after {timeout}s")
+                        return -1.0
+                    
+                    await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
             
-            pubsub.unsubscribe(f'QUOTES-{request_id}')
-            pubsub.close()
+            # Execute with overall timeout protection
+            try:
+                result = await asyncio.wait_for(_retrieve_with_timeout(), timeout=5.0)
+                return result if result is not None else -1.0
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ Option quote operation timed out for {symbol}")
+                return -1.0
+            finally:
+                if pubsub:
+                    try:
+                        pubsub.unsubscribe(f'QUOTES-{request_id}')
+                        pubsub.close()
+                    except:
+                        pass
             
         except Exception as e:
-            logger.error(f"❌ Error retrieving option quote for {symbol}: {e}")
+            logger.error(f"❌ Error retrieving option quote for {symbol}: {e}", exc_info=True)
+            if pubsub:
+                try:
+                    pubsub.unsubscribe(f'QUOTES-{request_id}')
+                    pubsub.close()
+                except:
+                    pass
             return -1.0
         
         logger.warning(f"⚠️ No option quote data received for {symbol}")

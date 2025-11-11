@@ -46,6 +46,7 @@ LOGGING_CONFIG = {
     "app.api": {"handlers": ["default"], "level": "CRITICAL", "propagate": False},
     "app.api.udf": {"handlers": ["default"], "level": "CRITICAL", "propagate": False},
     "app.routes": {"handlers": ["default"], "level": "CRITICAL", "propagate": False},
+    "app.routes.orders": {"handlers": ["default"], "level": "WARNING", "propagate": False},  # Disable orders/positions info logs, keep errors
     "app.utils": {"handlers": ["default"], "level": "CRITICAL", "propagate": False},
     "app.services": {"handlers": ["default"], "level": "CRITICAL", "propagate": False},
     "app.services.streaming_service": {"handlers": ["default"], "level": "CRITICAL", "propagate": False},

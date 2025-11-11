@@ -11,6 +11,7 @@ from app.db.postgres import AsyncSessionLocal
 from app.models.bot_models import BotInstance, BotLine, BotEvent
 from app.utils.ib_client import ib_client
 from ib_async import MarketOrder
+from app.utils.ib_interface import ib_interface
 from app.services.market_data_service import MarketDataService
 
 logger = logging.getLogger(__name__)
@@ -544,18 +545,27 @@ class BotService:
             
             # Monitor exit orders
             exit_orders_found = 0
+            active_exit_statuses = {
+                'PENDING', 'SUBMITTED', 'PRESUBMITTED', 'PENDINGSUBMIT',
+                'PENDING_SUBMIT', 'WORKING', 'UNKNOWN', 'API_PENDING'
+            }
             logger.info(f"🔄 Bot {bot_id}: Checking bot state for exit orders...")
             logger.info(f"🔄 Bot {bot_id}: Bot state keys: {list(bot_state.keys())}")
             
             for key, value in bot_state.items():
                 if key.startswith('exit_order_'):
                     logger.info(f"🔄 Bot {bot_id}: Found exit order key: {key}, value: {value}")
-                    if isinstance(value, dict) and value.get('status') == 'PENDING':
-                        exit_orders_found += 1
-                        logger.info(f"🔄 Bot {bot_id}: Monitoring exit order {key}, status={value.get('status')}")
-                        await self._check_exit_order_status(bot_id, key, value, current_price, should_update_prices)
+                    if isinstance(value, dict):
+                        status = (value.get('status') or 'PENDING').upper()
+                        value['status'] = status
+                        if status in active_exit_statuses:
+                            exit_orders_found += 1
+                            logger.info(f"🔄 Bot {bot_id}: Monitoring exit order {key}, status={status}")
+                            await self._check_exit_order_status(bot_id, key, value, current_price, should_update_prices)
+                        else:
+                            logger.info(f"🔄 Bot {bot_id}: Exit order {key} not active (status={status}): {value}")
                     else:
-                        logger.info(f"🔄 Bot {bot_id}: Exit order {key} not PENDING: {value}")
+                        logger.info(f"🔄 Bot {bot_id}: Exit order {key} not tracked (non-dict): {value}")
             
             logger.info(f"🔄 Bot {bot_id}: Found {exit_orders_found} pending exit orders")
                     
@@ -775,31 +785,80 @@ class BotService:
                 trade = await ib_client.place_order(contract, order)
                 
                 if trade:
-                    logger.info(f"✅ Bot {bot_id}: Exit order {trade.order.orderId} created for line {exit_line['id']}")
-                    
-                    # Store exit order information
+                    order_id = trade.order.orderId
+                    logger.info(f"✅ Bot {bot_id}: Exit order {order_id} created for line {exit_line['id']}")
+
+                    initial_status = await ib_client.await_order_submission(trade, timeout=6.0)
+                    normalized_status = (initial_status or 'PENDING').strip().upper()
+
+                    if normalized_status in {'CANCELLED', 'INACTIVE', 'APICANCELLED', 'REJECTED', 'ERROR'}:
+                        logger.error(
+                            f"❌ Bot {bot_id}: Exit order {order_id} rejected with status {normalized_status}"
+                        )
+                        await self._log_bot_event(bot_id, 'exit_order_rejected', {
+                            'line_id': exit_line['id'],
+                            'line_price': exit_line_price,
+                            'shares_to_sell': shares_to_sell,
+                            'order_id': order_id,
+                            'status': normalized_status,
+                        })
+                        continue
+
+                    if normalized_status == 'FILLED':
+                        logger.info(
+                            f"Bot {bot_id}: Exit order {order_id} filled immediately at ${exit_line_price:.2f}"
+                        )
+                        bot_state['shares_exited'] = bot_state.get('shares_exited', 0) + shares_to_sell
+                        bot_state['open_shares'] = max(0, bot_state.get('open_shares', 0) - shares_to_sell)
+
+                        fully_closed = bot_state['open_shares'] <= 0
+                        if fully_closed:
+                            bot_state['is_bought'] = False
+                            bot_state['crossed_lines'] = set()
+
+                        await self._update_bot_in_db(bot_id, {
+                            'shares_exited': bot_state['shares_exited'],
+                            'open_shares': bot_state['open_shares'],
+                            'is_bought': bot_state.get('is_bought', False),
+                        })
+
+                        await self._log_bot_event(bot_id, 'spot_position_partial_exit', {
+                            'line_id': exit_line['id'],
+                            'line_price': exit_line_price,
+                            'shares_sold': shares_to_sell,
+                            'remaining_shares': bot_state['open_shares'],
+                            'total_exited': bot_state['shares_exited'],
+                            'order_id': order_id,
+                            'strategy': 'uptrend_spot_limit',
+                            'note': 'filled_immediately_on_submit'
+                        })
+
+                        if fully_closed:
+                            logger.info(f"🎉 Bot {bot_id}: All shares sold via immediate fill; completing bot.")
+                            await self._complete_bot(bot_id)
+                        continue
+
                     exit_order_key = f"exit_order_{exit_line['id']}"
                     bot_state[exit_order_key] = {
-                        'order_id': trade.order.orderId,
-                        'status': 'PENDING',
+                        'order_id': order_id,
+                        'status': normalized_status,
                         'price': exit_line_price,
                         'quantity': shares_to_sell,
                         'last_update': time.time(),
                         'line_id': exit_line['id']
                     }
                     
-                    # Update database
                     await self._update_bot_in_db(bot_id, {
-                        f'{exit_order_key}_id': trade.order.orderId,
-                        f'{exit_order_key}_status': 'PENDING'
+                        f'{exit_order_key}_id': order_id,
+                        f'{exit_order_key}_status': normalized_status
                     })
                     
-                    # Log event
                     await self._log_bot_event(bot_id, 'exit_order_created', {
                         'line_id': exit_line['id'],
                         'line_price': exit_line_price,
                         'shares_to_sell': shares_to_sell,
-                        'order_id': trade.order.orderId,
+                        'order_id': order_id,
+                        'initial_status': normalized_status,
                         'strategy': 'uptrend_spot_limit'
                     })
                 else:
@@ -1602,7 +1661,7 @@ class BotService:
                         else:
                             logger.warning(f"❌ Bot {bot_id}: Invalid price for {bot_state['symbol']}: {price}")
                                 
-                await asyncio.sleep(5)  # Check every 5 seconds
+                await asyncio.sleep(30)  # Check every 30 seconds
                 
             except Exception as e:
                 logger.error(f"Error in price monitoring loop: {e}")
@@ -1640,34 +1699,48 @@ class BotService:
     async def _get_current_price(self, symbol: str) -> float:
         """Get current price using direct IBKR connection"""
         try:
-            logger.info(f"🔍 Qualifying contract for {symbol}")
-            # Qualify the stock contract
+            # First try Redis/IBKR bridge (works with delayed data and Docker feed)
+            price = await ib_interface.retrieve_quote(symbol)
+            if price and price > 0:
+                logger.info(f"✅ Using Redis quote for {symbol}: ${price:.2f}")
+                return float(price)
+
+            logger.warning(f"⚠️ Redis quote unavailable for {symbol}; falling back to historical bars")
+
+            # Fall back to historical data (IBKR provides delayed data without real-time subscription)
+            bars = await ib_client.history_bars(symbol, duration="30 M", barSize="1 min", rth=True)
+            if bars:
+                latest_bar = bars[-1]
+                bar_price = getattr(latest_bar, "close", None) or getattr(latest_bar, "average", None) or getattr(latest_bar, "open", None)
+                if bar_price and bar_price > 0:
+                    logger.info(f"✅ Using latest historical bar for {symbol}: close=${bar_price:.2f}")
+                    return float(bar_price)
+                logger.warning(f"⚠️ Historical bar for {symbol} missing usable price: {latest_bar}")
+
+            logger.warning(f"⚠️ Historical data unavailable for {symbol}; requesting snapshot market data as last resort")
+
+            # As a final fallback, request a delayed snapshot from IBKR (may fail without permissions)
             contract = await ib_client.qualify_stock(symbol)
             if not contract:
                 logger.error(f"Could not qualify contract for {symbol}")
                 return -1.0
-            
-            logger.info(f"🔍 Requesting market data for {symbol}")
-            # Request market data
-            ticker = ib_client.ib.reqMktData(contract, "", False, False)
-            
-            # Wait a bit for data to arrive
-            await asyncio.sleep(1)
-            
-            logger.info(f"🔍 Ticker data for {symbol}: last={ticker.last}, bid={ticker.bid}, ask={ticker.ask}")
-            
-            # Get the last price
+
+            ticker = ib_client.ib.reqMktData(contract, "", True, False)  # snapshot=True gives delayed data
+            await asyncio.sleep(1.0)
+
             if ticker.last and ticker.last > 0:
-                logger.debug(f"✅ Got price for {symbol}: ${ticker.last}")
+                logger.info(f"✅ Snapshot price for {symbol}: ${ticker.last:.2f}")
                 return float(ticker.last)
-            elif ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
-                # Use mid-price if last is not available
+            if ticker.close and ticker.close > 0:
+                logger.info(f"✅ Snapshot close price for {symbol}: ${ticker.close:.2f}")
+                return float(ticker.close)
+            if ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
                 mid_price = (ticker.bid + ticker.ask) / 2
-                logger.debug(f"✅ Got mid-price for {symbol}: ${mid_price}")
+                logger.info(f"✅ Snapshot mid-price for {symbol}: ${mid_price:.2f}")
                 return float(mid_price)
-            else:
-                logger.warning(f"No valid price data for {symbol} - last: {ticker.last}, bid: {ticker.bid}, ask: {ticker.ask}")
-                return -1.0
+
+            logger.warning(f"No valid snapshot data for {symbol} - last: {ticker.last}, bid: {ticker.bid}, ask: {ticker.ask}, close: {getattr(ticker, 'close', None)}")
+            return -1.0
                 
         except Exception as e:
             logger.error(f"Error getting price for {symbol}: {e}")

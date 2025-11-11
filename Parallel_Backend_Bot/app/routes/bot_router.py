@@ -86,6 +86,8 @@ async def create_bot(
                 open_shares=bot.open_shares or 0,
                 position_size=bot.position_size or 0,
                 max_position=bot.max_position or 0,
+                status=bot.status if bot.status is not None else 'ACTIVE',
+                multi_buy=bot.multi_buy if bot.multi_buy is not None else 'disabled',
                 created_at=bot.created_at.isoformat(),
                 updated_at=bot.updated_at.isoformat()
             )
@@ -142,47 +144,70 @@ async def get_bot_status(
     bot_id: int,
     current_user: UserResponse = Depends(get_current_user)
 ):
-    """Get bot status"""
+    """Get bot status - optimized with timeout protection"""
+    import asyncio
+    import time
+    start_time = time.time()
+    
     try:
         # Get bot from database
         from app.db.postgres import AsyncSessionLocal
         from sqlalchemy import select
         
         async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(BotInstance).where(BotInstance.id == bot_id)
-            )
-            bot = result.scalar_one_or_none()
+            try:
+                result = await asyncio.wait_for(
+                    session.execute(
+                        select(BotInstance).where(BotInstance.id == bot_id)
+                    ),
+                    timeout=3.0  # 3 second timeout
+                )
+                bot = result.scalar_one_or_none()
             
-            if not bot:
-                raise HTTPException(status_code=404, detail="Bot not found")
-            
-            return BotResponse(
-                id=bot.id,
-                config_id=bot.config_id,
-                symbol=bot.symbol,
-                name=bot.name,
-                is_active=bot.is_active if bot.is_active is not None else False,
-                is_running=bot.is_running if bot.is_running is not None else False,
-                is_bought=bot.is_bought if bot.is_bought is not None else False,
-                current_price=float(bot.current_price) if bot.current_price is not None else 0.0,
-                entry_price=float(bot.entry_price) if bot.entry_price is not None else 0.0,
-                total_position=bot.total_position or 0,
-                shares_entered=bot.shares_entered or 0,
-                shares_exited=bot.shares_exited or 0,
-                open_shares=bot.open_shares or 0,
-                position_size=bot.position_size or 0,
-                max_position=bot.max_position or 0,
-                status=bot.status or 'ACTIVE',
-                multi_buy=bot.multi_buy or 'disabled',
-                created_at=bot.created_at.isoformat(),
-                updated_at=bot.updated_at.isoformat()
-            )
+                if not bot:
+                    raise HTTPException(status_code=404, detail="Bot not found")
+                
+                elapsed = time.time() - start_time
+                if elapsed > 1.0:
+                    logger.warning(f"⚠️ /bots/status/{bot_id} query took {elapsed:.2f}s")
+                
+                return BotResponse(
+                    id=bot.id,
+                    config_id=bot.config_id,
+                    symbol=bot.symbol,
+                    name=bot.name,
+                    is_active=bot.is_active if bot.is_active is not None else False,
+                    is_running=bot.is_running if bot.is_running is not None else False,
+                    is_bought=bot.is_bought if bot.is_bought is not None else False,
+                    current_price=float(bot.current_price) if bot.current_price is not None else 0.0,
+                    entry_price=float(bot.entry_price) if bot.entry_price is not None else 0.0,
+                    total_position=bot.total_position or 0,
+                    shares_entered=bot.shares_entered or 0,
+                    shares_exited=bot.shares_exited or 0,
+                    open_shares=bot.open_shares or 0,
+                    position_size=bot.position_size or 0,
+                    max_position=bot.max_position or 0,
+                    status=bot.status or 'ACTIVE',
+                    multi_buy=bot.multi_buy or 'disabled',
+                    created_at=bot.created_at.isoformat(),
+                    updated_at=bot.updated_at.isoformat()
+                )
+            except asyncio.TimeoutError:
+                elapsed = time.time() - start_time
+                logger.error(f"❌ /bots/status/{bot_id} query TIMEOUT after {elapsed:.2f}s")
+                raise HTTPException(status_code=504, detail=f"Database query timeout after {elapsed:.2f}s")
+            except HTTPException:
+                raise
+            except Exception as e:
+                elapsed = time.time() - start_time
+                logger.error(f"❌ Error getting bot status {bot_id} after {elapsed:.2f}s: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Failed to get bot status: {str(e)}")
             
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting bot status {bot_id}: {e}")
+        elapsed = time.time() - start_time
+        logger.error(f"❌ /bots/status/{bot_id} error after {elapsed:.2f}s: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get bot status: {str(e)}")
 
 @router.get("/debug/{bot_id}")
@@ -250,42 +275,66 @@ async def get_bot_debug_status(
 async def list_bots(
     current_user: UserResponse = Depends(get_current_user)
 ):
-    """List all bots"""
+    """List all bots - optimized with timeout protection"""
+    import asyncio
+    import time
+    start_time = time.time()
+    
     try:
         from app.db.postgres import AsyncSessionLocal
         from sqlalchemy import select
         
         async with AsyncSessionLocal() as session:
-            result = await session.execute(select(BotInstance))
-            bots = result.scalars().all()
-            
-            return [
-                BotResponse(
-                    id=bot.id,
-                    config_id=bot.config_id,
-                    symbol=bot.symbol,
-                    name=bot.name,
-                    is_active=bot.is_active if bot.is_active is not None else False,
-                    is_running=bot.is_running if bot.is_running is not None else False,
-                    is_bought=bot.is_bought if bot.is_bought is not None else False,
-                    current_price=float(bot.current_price) if bot.current_price is not None else 0.0,
-                    entry_price=float(bot.entry_price) if bot.entry_price is not None else 0.0,
-                    total_position=bot.total_position or 0,
-                    shares_entered=bot.shares_entered or 0,
-                    shares_exited=bot.shares_exited or 0,
-                    open_shares=bot.open_shares or 0,
-                    position_size=bot.position_size or 0,
-                    max_position=bot.max_position or 0,
-                    status=bot.status or 'ACTIVE',  # Add status field with default
-                    multi_buy=bot.multi_buy or 'disabled',  # Add multi_buy field
-                    created_at=bot.created_at.isoformat(),
-                    updated_at=bot.updated_at.isoformat()
+            try:
+                # Use timeout to prevent hanging on slow queries
+                result = await asyncio.wait_for(
+                    session.execute(select(BotInstance).order_by(BotInstance.id.desc())),
+                    timeout=5.0  # 5 second timeout for query
                 )
-                for bot in bots
-            ]
+                bots = result.scalars().all()
+                
+                elapsed = time.time() - start_time
+                if elapsed > 2.0:
+                    logger.warning(f"⚠️ /bots/list query took {elapsed:.2f}s ({len(bots)} bots)")
+                
+                return [
+                    BotResponse(
+                        id=bot.id,
+                        config_id=bot.config_id,
+                        symbol=bot.symbol,
+                        name=bot.name,
+                        is_active=bot.is_active if bot.is_active is not None else False,
+                        is_running=bot.is_running if bot.is_running is not None else False,
+                        is_bought=bot.is_bought if bot.is_bought is not None else False,
+                        current_price=float(bot.current_price) if bot.current_price is not None else 0.0,
+                        entry_price=float(bot.entry_price) if bot.entry_price is not None else 0.0,
+                        total_position=bot.total_position or 0,
+                        shares_entered=bot.shares_entered or 0,
+                        shares_exited=bot.shares_exited or 0,
+                        open_shares=bot.open_shares or 0,
+                        position_size=bot.position_size or 0,
+                        max_position=bot.max_position or 0,
+                        status=bot.status or 'ACTIVE',  # Add status field with default
+                        multi_buy=bot.multi_buy or 'disabled',  # Add multi_buy field
+                        created_at=bot.created_at.isoformat(),
+                        updated_at=bot.updated_at.isoformat()
+                    )
+                    for bot in bots
+                ]
+            except asyncio.TimeoutError:
+                elapsed = time.time() - start_time
+                logger.error(f"❌ /bots/list query TIMEOUT after {elapsed:.2f}s")
+                raise HTTPException(status_code=504, detail=f"Database query timeout after {elapsed:.2f}s")
+            except Exception as e:
+                elapsed = time.time() - start_time
+                logger.error(f"❌ Error listing bots after {elapsed:.2f}s: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Failed to list bots: {str(e)}")
             
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error listing bots: {e}")
+        elapsed = time.time() - start_time
+        logger.error(f"❌ /bots/list error after {elapsed:.2f}s: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list bots: {str(e)}")
 
 @router.post("/{bot_id}/lines", response_model=BotStatusResponse)
@@ -354,13 +403,22 @@ async def get_bot_trade_history(
     bot_id: int,
     current_user: UserResponse = Depends(get_current_user)
 ):
-    """Get trade history for a specific bot"""
+    """Get trade history and current orders for a specific bot"""
     try:
         from app.db.postgres import AsyncSessionLocal
         from sqlalchemy import select
-        from app.models.bot_models import BotEvent
+        from app.models.bot_models import BotEvent, BotInstance, BotLine
         
         async with AsyncSessionLocal() as session:
+            # Get bot instance
+            bot_result = await session.execute(
+                select(BotInstance).where(BotInstance.id == bot_id)
+            )
+            bot = bot_result.scalar_one_or_none()
+            
+            if not bot:
+                raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+            
             # Get bot events for the specific bot
             result = await session.execute(
                 select(BotEvent)
@@ -369,10 +427,73 @@ async def get_bot_trade_history(
             )
             events = result.scalars().all()
             
+            # Get bot lines (for exit orders)
+            lines_result = await session.execute(
+                select(BotLine)
+                .where(BotLine.bot_id == bot_id)
+                .where(BotLine.line_type == 'exit')
+                .where(BotLine.is_active == True)
+            )
+            exit_lines = lines_result.scalars().all()
+            
+            # Track order IDs we've already included to avoid duplicates
+            included_order_ids = set()
+            
             # Transform events into trade history format
             trade_history = []
+            
+            # First, add current pending orders from bot instance state
+            # Check for pending entry order
+            if bot.entry_order_id and bot.entry_order_status == 'PENDING':
+                trade_history.append({
+                    "side": "BUY",
+                    "filled": "Pending",
+                    "target": "Entry",
+                    "filled_at": None,
+                    "shares_filled": bot.position_size or 0,
+                    "price": float(bot.current_price) if bot.current_price else 0.0,
+                    "order_id": bot.entry_order_id,
+                    "event_type": "entry_order_pending"
+                })
+                included_order_ids.add(bot.entry_order_id)
+            
+            # Check for stop loss order
+            if bot.stop_loss_order_id and bot.is_bought:
+                trade_history.append({
+                    "side": "SELL",
+                    "filled": "Pending",
+                    "target": "Stop Loss",
+                    "filled_at": None,
+                    "shares_filled": bot.open_shares or 0,
+                    "price": float(bot.stop_loss_price) if bot.stop_loss_price else 0.0,
+                    "order_id": bot.stop_loss_order_id,
+                    "event_type": "stop_loss_order_active"
+                })
+                included_order_ids.add(bot.stop_loss_order_id)
+            
+            # Add exit line orders (if they have order IDs stored in events)
+            # We'll get these from events below, but also check if there are exit lines without events
+            for line in exit_lines:
+                # Check if this line has a pending order in events
+                line_has_order = False
+                for event in events:
+                    if event.event_type == "exit_order_created":
+                        event_data = event.event_data or {}
+                        if event_data.get("line_price") == float(line.price):
+                            line_has_order = True
+                            break
+                
+                # If exit line exists but no order event, it might be waiting or the order hasn't been created yet
+                # We'll rely on events for this
+            
+            # Now process events
             for event in events:
                 event_data = event.event_data or {}
+                order_id = event_data.get("order_id")
+                
+                # Skip if we've already included this order from current state
+                if order_id and order_id in included_order_ids:
+                    continue
                 
                 # Map event types to trade history format
                 if event.event_type == "spot_position_opened":
@@ -383,9 +504,25 @@ async def get_bot_trade_history(
                         "filled_at": event.timestamp.isoformat() if event.timestamp else None,
                         "shares_filled": event_data.get("shares_bought", 0),
                         "price": event_data.get("entry_price", 0),
-                        "order_id": event_data.get("order_id"),
+                        "order_id": order_id,
                         "event_type": event.event_type
                     })
+                    if order_id:
+                        included_order_ids.add(order_id)
+                elif event.event_type == "options_position_opened":
+                    # Options entry (PUT/CALL)
+                    trade_history.append({
+                        "side": "BUY",
+                        "filled": "Yes",
+                        "target": f"Entry (Option: {event_data.get('strike', 'N/A')} {event_data.get('expiry', 'N/A')})",
+                        "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                        "shares_filled": event_data.get("contracts", 0),  # Contracts for options
+                        "price": event_data.get("option_price", 0),
+                        "order_id": order_id,
+                        "event_type": event.event_type
+                    })
+                    if order_id:
+                        included_order_ids.add(order_id)
                 elif event.event_type == "spot_position_partial_exit":
                     trade_history.append({
                         "side": "SELL",
@@ -394,9 +531,25 @@ async def get_bot_trade_history(
                         "filled_at": event.timestamp.isoformat() if event.timestamp else None,
                         "shares_filled": event_data.get("shares_sold", 0),
                         "price": event_data.get("exit_price", 0),
-                        "order_id": event_data.get("order_id"),
+                        "order_id": order_id,
                         "event_type": event.event_type
                     })
+                    if order_id:
+                        included_order_ids.add(order_id)
+                elif event.event_type == "options_position_partial_exit":
+                    # Options exit
+                    trade_history.append({
+                        "side": "SELL",
+                        "filled": "Yes",
+                        "target": "Exit (Option)",
+                        "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                        "shares_filled": event_data.get("contracts_sold", 0),  # Contracts for options
+                        "price": event_data.get("exit_price", 0),
+                        "order_id": order_id,
+                        "event_type": event.event_type
+                    })
+                    if order_id:
+                        included_order_ids.add(order_id)
                 elif event.event_type == "hard_stop_out_sell":
                     trade_history.append({
                         "side": "SELL",
@@ -405,36 +558,54 @@ async def get_bot_trade_history(
                         "filled_at": event.timestamp.isoformat() if event.timestamp else None,
                         "shares_filled": event_data.get("shares_sold", 0),
                         "price": event_data.get("current_price", 0),
-                        "order_id": event_data.get("order_id"),
+                        "order_id": order_id,
                         "event_type": event.event_type
                     })
+                    if order_id:
+                        included_order_ids.add(order_id)
                 elif event.event_type == "exit_order_created":
-                    trade_history.append({
-                        "side": "SELL",
-                        "filled": "Pending",
-                        "target": "Exit",
-                        "filled_at": None,
-                        "shares_filled": event_data.get("shares_to_sell", 0),
-                        "price": event_data.get("line_price", 0),
-                        "order_id": event_data.get("order_id"),
-                        "event_type": event.event_type
-                    })
+                    # Only add if not already included
+                    if not order_id or order_id not in included_order_ids:
+                        trade_history.append({
+                            "side": "SELL",
+                            "filled": "Pending",
+                            "target": "Exit",
+                            "filled_at": None,
+                            "shares_filled": event_data.get("shares_to_sell", 0),
+                            "price": event_data.get("line_price", 0),
+                            "order_id": order_id,
+                            "event_type": event.event_type
+                        })
+                        if order_id:
+                            included_order_ids.add(order_id)
                 elif event.event_type == "stop_loss_order_placed":
-                    trade_history.append({
-                        "side": "SELL",
-                        "filled": "Pending",
-                        "target": "Stop Loss",
-                        "filled_at": None,
-                        "shares_filled": event_data.get("quantity", 0),
-                        "price": event_data.get("stop_loss_price", 0),
-                        "order_id": event_data.get("order_id"),
-                        "event_type": event.event_type
-                    })
+                    # Only add if not already included (from current state)
+                    if not order_id or order_id not in included_order_ids:
+                        trade_history.append({
+                            "side": "SELL",
+                            "filled": "Pending",
+                            "target": "Stop Loss",
+                            "filled_at": None,
+                            "shares_filled": event_data.get("quantity", 0),
+                            "price": event_data.get("stop_loss_price", 0),
+                            "order_id": order_id,
+                            "event_type": event.event_type
+                        })
+                        if order_id:
+                            included_order_ids.add(order_id)
+            
+            # Sort by timestamp (pending orders first, then by time)
+            trade_history.sort(key=lambda x: (
+                0 if x["filled"] == "Pending" else 1,  # Pending orders first
+                x.get("filled_at") or ""  # Then by timestamp
+            ), reverse=True)
             
             return trade_history
             
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error getting trade history for bot {bot_id}: {e}")
+        logger.error(f"Error getting trade history for bot {bot_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get trade history: {str(e)}")
 
 @router.get("/service/status")

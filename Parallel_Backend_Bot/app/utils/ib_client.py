@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Dict, Optional, List
 from ib_async import IB, Stock, Contract, ContractDetails, MarketOrder, LimitOrder, StopLimitOrder, Ticker
 from app.config import settings
@@ -21,11 +22,18 @@ class IBClient:
         self._connected = False
         self._contract_cache: Dict[str, Contract] = {}
         self._details_cache: Dict[str, ContractDetails] = {}
+        self._open_order_cache: Dict[int, any] = {}
+        self._order_status_cache: Dict[int, str] = {}
         self._connect_task = None
         
         # Event handlers
         self.ib.errorEvent += self.on_error
         self.ib.disconnectedEvent += self.on_disconnected
+        self.ib.openOrderEvent += self._on_open_order_event
+        try:
+            self.ib.orderStatusEvent += self._on_order_status_event
+        except AttributeError:
+            logger.debug("orderStatusEvent not available on IB client")
 
     @classmethod
     def instance(cls) -> "IBClient":
@@ -101,6 +109,51 @@ class IBClient:
             logger.error(f"Error qualifying stock {symbol}: {e}")
             return None
 
+    def _on_open_order_event(self, trade):
+        try:
+            order = getattr(trade, 'order', None)
+            if order and hasattr(order, 'orderId'):
+                order_id = order.orderId
+                self._open_order_cache[order_id] = trade
+                status = None
+                order_status = getattr(trade, 'orderStatus', None)
+                if order_status and hasattr(order_status, 'status'):
+                    status = order_status.status
+                if status:
+                    self._order_status_cache[order_id] = status
+        except Exception as e:
+            logger.debug(f"Error handling openOrderEvent: {e}")
+
+    def _on_order_status_event(
+        self,
+        orderId,
+        status,
+        filled,
+        remaining,
+        avgFillPrice,
+        permId,
+        parentId,
+        lastFillPrice,
+        clientId,
+        whyHeld,
+        mktCapPrice,
+    ):
+        try:
+            if orderId is None:
+                return
+            if status:
+                self._order_status_cache[orderId] = status
+                if orderId in self._open_order_cache:
+                    trade = self._open_order_cache[orderId]
+                    order_status = getattr(trade, 'orderStatus', None)
+                    if order_status is not None:
+                        order_status.status = status
+                normalized = status.upper()
+                if normalized in {'FILLED', 'CANCELLED', 'INACTIVE', 'REJECTED', 'APICANCELLED', 'NOTFOUND'}:
+                    self._open_order_cache.pop(orderId, None)
+        except Exception as e:
+            logger.debug(f"Error handling orderStatusEvent: {e}")
+
     def get_specs(self, symbol: str):
         d = self._details_cache.get(symbol.upper())
         if not d:
@@ -136,6 +189,20 @@ class IBClient:
         trade = self.ib.placeOrder(contract, order)
         return trade
     
+    async def await_order_submission(self, trade, timeout: float = 5.0) -> str:
+        """Wait for an order to leave Pending state and return its status."""
+        await self.ensure_connected()
+        start = time.time()
+        last_status = trade.orderStatus.status or "Unknown"
+        while time.time() - start < timeout:
+            status = trade.orderStatus.status or last_status
+            if status not in ("PendingSubmit", "ApiPending"):
+                return status
+            last_status = status
+            await asyncio.sleep(0.1)
+        logger.warning(f"⚠️ Order {trade.order.orderId} did not leave pending state within {timeout}s (status={last_status})")
+        return trade.orderStatus.status or last_status
+
     async def get_positions(self):
         """Get all positions from IB account"""
         await self.ensure_connected()
@@ -148,31 +215,123 @@ class IBClient:
         portfolio = self.ib.portfolio()
         return portfolio
     
+    async def get_option_chain(self, symbol: str) -> Optional[dict]:
+        """
+        Get option chain (expiration dates and strikes) from IBKR using reqSecDefOptParams
+        Returns: {
+            'expiration_dates': [timestamp1, timestamp2, ...],
+            'strikes': [strike1, strike2, ...]
+        }
+        """
+        await self.ensure_connected()
+        try:
+            # First qualify the stock contract
+            stock_contract = await self.qualify_stock(symbol)
+            if not stock_contract:
+                logger.error(f"Could not qualify stock {symbol} for option chain")
+                return None
+            
+            # Request option chain parameters
+            secDefOptParams = await self.ib.reqSecDefOptParamsAsync(
+                stock_contract.symbol,
+                "",
+                stock_contract.secType,
+                stock_contract.conId
+            )
+            
+            if not secDefOptParams:
+                logger.error(f"No option chain data returned for {symbol}")
+                return None
+            
+            # Get the first (usually only) option chain
+            if len(secDefOptParams) == 0:
+                logger.error(f"Empty option chain for {symbol}")
+                return None
+            
+            chain = secDefOptParams[0]
+            
+            # Extract expiration dates and strikes
+            expiration_dates = chain.expirations if hasattr(chain, 'expirations') else []
+            strikes = chain.strikes if hasattr(chain, 'strikes') else []
+            
+            # Log first few expiration dates to see their format
+            if expiration_dates:
+                logger.info(f"✅ Got option chain for {symbol}: {len(expiration_dates)} expirations, {len(strikes)} strikes")
+                logger.info(f"🔍 Sample expiration dates (first 3): {expiration_dates[:3]}, types: {[type(d).__name__ for d in expiration_dates[:3]]}")
+            else:
+                logger.warning(f"⚠️ No expiration dates found for {symbol}")
+            
+            return {
+                'expiration_dates': expiration_dates,
+                'strikes': strikes
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting option chain for {symbol}: {e}", exc_info=True)
+            return None
+    
     async def get_order_status(self, order_id: int) -> str:
         """Get the status of an order by its ID"""
         await self.ensure_connected()
         try:
-            # Get all open orders
+            # First check the current openOrders cache
             open_orders = self.ib.openOrders()
             logger.info(f"🔍 Checking order {order_id} status. Open orders: {len(open_orders)}")
-            
-            # Find the order by ID
+
             for order in open_orders:
-                if order.order.orderId == order_id:
-                    logger.info(f"🔍 Found order {order_id} in open orders: {order.orderStatus.status}")
-                    return order.orderStatus.status
-            
-            # If not found in open orders, check filled orders
+                try:
+                    if order.order.orderId == order_id:
+                        status = order.orderStatus.status or "Unknown"
+                        logger.info(f"🔍 Found order {order_id} in open orders: {status}")
+                        return status
+                except AttributeError:
+                    continue
+
+            # If not found, request all open orders (across all client IDs)
+            logger.debug(f"🔍 Order {order_id} not found in cached openOrders(); requesting all open orders from IBKR")
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self.ib.reqAllOpenOrders), timeout=3.0)
+                await asyncio.sleep(0.2)  # allow events to populate
+            except Exception as e:
+                logger.warning(f"⚠️ Could not reqAllOpenOrders(): {e}")
+
+            open_orders = self.ib.openOrders()
+            logger.info(f"🔍 After reqAllOpenOrders(), open orders: {len(open_orders)}")
+            for order in open_orders:
+                try:
+                    if order.order.orderId == order_id:
+                        status = order.orderStatus.status or "Unknown"
+                        logger.info(f"🔍 Found order {order_id} after reqAllOpenOrders(): {status}")
+                        return status
+                except AttributeError:
+                    continue
+
+            cached_trade = self._open_order_cache.get(order_id)
+            if cached_trade:
+                order_status = getattr(cached_trade, 'orderStatus', None)
+                status = getattr(order_status, 'status', None) or self._order_status_cache.get(order_id)
+                if status:
+                    logger.info(f"🔍 Found order {order_id} in cached open order events: {status}")
+                    return status
+
+            cached_status = self._order_status_cache.get(order_id)
+            if cached_status:
+                logger.info(f"🔍 Returning cached status for order {order_id}: {cached_status}")
+                return cached_status
+
+            # Finally check fills to see if it completed
             fills = self.ib.fills()
             logger.info(f"🔍 Checking fills for order {order_id}. Total fills: {len(fills)}")
-            
             for fill in fills:
-                if fill.execution.orderId == order_id:
-                    logger.info(f"🔍 Found order {order_id} in fills: Filled")
-                    return "Filled"
-            
-            logger.info(f"🔍 Order {order_id} not found in open orders or fills")
-            return "Unknown"
+                try:
+                    if fill.execution.orderId == order_id:
+                        logger.info(f"🔍 Found order {order_id} in fills: Filled")
+                        return "Filled"
+                except AttributeError:
+                    continue
+
+            logger.info(f"🔍 Order {order_id} not found in open orders or fills (treating as NotFound)")
+            return "NotFound"
         except Exception as e:
             logger.error(f"Error getting order status for {order_id}: {e}")
             return "Error"
@@ -203,22 +362,41 @@ class IBClient:
         """Cancel an order by its ID"""
         await self.ensure_connected()
         try:
-            # Get all open orders
+            # First, try to find the order in openOrders() as Trade objects
             open_orders = self.ib.openOrders()
             
-            # Find the order by ID
-            for order in open_orders:
-                if order.order.orderId == order_id:
-                    # Cancel the order
-                    self.ib.cancelOrder(order.order)
-                    logger.info(f"✅ Cancelled order {order_id}")
-                    return True
+            for trade in open_orders:
+                # Check if it's a Trade object
+                if hasattr(trade, 'order') and hasattr(trade.order, 'orderId'):
+                    if trade.order.orderId == order_id:
+                        # Cancel the order
+                        self.ib.cancelOrder(trade.order)
+                        logger.info(f"✅ Cancelled order {order_id} (from Trade object)")
+                        return True
+                # Check if it's an Order object directly
+                elif hasattr(trade, 'orderId'):
+                    if trade.orderId == order_id:
+                        # Cancel the order
+                        self.ib.cancelOrder(trade)
+                        logger.info(f"✅ Cancelled order {order_id} (from Order object)")
+                        return True
             
-            logger.warning(f"Order {order_id} not found in open orders")
+            # If not found in openOrders, try to find in trades() and cancel
+            logger.debug(f"Order {order_id} not found in openOrders(), checking trades()...")
+            all_trades = self.ib.trades()
+            for trade in all_trades:
+                if hasattr(trade, 'order') and hasattr(trade.order, 'orderId'):
+                    if trade.order.orderId == order_id:
+                        # Cancel the order
+                        self.ib.cancelOrder(trade.order)
+                        logger.info(f"✅ Cancelled order {order_id} (from trades() list)")
+                        return True
+            
+            logger.warning(f"Order {order_id} not found in open orders or trades")
             return False
             
         except Exception as e:
-            logger.error(f"Error cancelling order {order_id}: {e}")
+            logger.error(f"Error cancelling order {order_id}: {e}", exc_info=True)
             return False
     
     async def get_contract(self, symbol: str) -> Optional[Contract]:

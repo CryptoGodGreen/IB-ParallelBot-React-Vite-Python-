@@ -9,11 +9,15 @@ logger = logging.getLogger(__name__)
 # If running in Docker, resolve the hostname once at startup
 import socket
 try:
+    # Add timeout to DNS resolution to prevent hanging
+    socket.setdefaulttimeout(2)  # 2 second timeout for DNS resolution
     postgres_ip = socket.gethostbyname(settings.POSTGRES_HOST)
     logger.info(f"🔍 Resolved {settings.POSTGRES_HOST} to {postgres_ip}")
-except socket.gaierror:
+    socket.setdefaulttimeout(None)  # Reset to default
+except (socket.gaierror, socket.timeout) as e:
     postgres_ip = settings.POSTGRES_HOST
-    logger.warning(f"⚠️ Could not resolve {settings.POSTGRES_HOST}, using as-is")
+    logger.warning(f"⚠️ Could not resolve {settings.POSTGRES_HOST} (error: {e}), using as-is")
+    socket.setdefaulttimeout(None)  # Reset to default
 
 DATABASE_URL = (
     f"postgresql+asyncpg://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
@@ -24,19 +28,19 @@ engine = create_async_engine(
     DATABASE_URL, 
     echo=False, 
     future=True,
-    pool_size=20,  # Increase connection pool size
-    max_overflow=10,  # Allow up to 10 additional connections
-    pool_pre_ping=True,  # Verify connections before using them
-    pool_recycle=3600,  # Recycle connections after 1 hour
-    pool_timeout=10,  # Wait up to 10 seconds for a connection
+    pool_size=15,  # Increased to handle concurrent requests
+    max_overflow=10,  # Allow more overflow connections
+    pool_pre_ping=False,  # Disabled - can cause hangs on slow/unresponsive DB. Connection recycling handles stale connections.
+    pool_recycle=300,  # Recycle connections after 5 minutes
+    pool_timeout=10,  # Increased to 10 seconds - give more time to get connection from pool
     # asyncpg-specific optimizations
     connect_args={
         "server_settings": {
             "application_name": "fastapi_trading_bot",
             "jit": "off",  # Disable JIT compilation for faster queries
         },
-        "command_timeout": 10,  # 10 second timeout for commands
-        "timeout": 5,  # 5 second connection timeout
+        "command_timeout": 10,  # Increased to 10 seconds for slow queries
+        "timeout": 5,  # 5 seconds for initial connection
     }
 )
 
