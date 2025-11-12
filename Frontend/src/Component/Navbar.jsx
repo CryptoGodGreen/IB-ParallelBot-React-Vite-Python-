@@ -3,10 +3,10 @@ import logo from "../assets/logo.jpg";
 import toast from "react-hot-toast";
 import { useContext, useRef, useEffect, useState } from "react";
 import { AuthContext } from "../context/AuthContext";
-import { FaUserCircle, FaBars, FaChevronDown } from "react-icons/fa";
+import { FaUserCircle, FaChevronDown } from "react-icons/fa";
 import SearchAutocomplete from "./SearchAutocomplete";
 
-export default function Navbar({ isSidebarOpen, toggleSidebar }) {
+export default function Navbar() {
   const navigate = useNavigate();
   const { isAuthenticated, setIsAuthenticated } = useContext(AuthContext);
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -36,15 +36,8 @@ export default function Navbar({ isSidebarOpen, toggleSidebar }) {
         <div className="absolute inset-0 bg-gradient-to-r from-blue-600 via-indigo-600 to-fuchsia-600 opacity-80 blur-md"></div>
         <div className="relative backdrop-blur-sm bg-slate-900/70 border-b border-slate-800">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
-            {/* Left: Menu + Logo */}
+            {/* Left: Logo */}
             <div className="flex items-center gap-3">
-              <button
-                onClick={toggleSidebar}
-                className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700"
-                aria-label="Toggle sidebar"
-              >
-                <FaBars />
-              </button>
               <NavLink to="/" className="flex items-center gap-2">
                 <img src={logo} alt="Logo" className="h-9 w-9 rounded-md shadow" />
                 <span className="hidden sm:inline font-extrabold tracking-tight text-white">PB Terminal</span>

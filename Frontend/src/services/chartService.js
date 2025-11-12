@@ -1,3 +1,5 @@
+import { showAuthExpiredModal } from '../hooks/useAuthExpired';
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 class ChartService {
@@ -8,7 +10,7 @@ class ChartService {
       this.clearInvalidToken();
       throw new Error('Authentication failed. Please log in again.');
     }
-    
+ 
     if (!response.ok) {
       const errorText = await response.text();
       console.error('❌ API Error:', response.status, response.statusText, errorText);
@@ -216,14 +218,8 @@ class ChartService {
     localStorage.removeItem('token');
     console.log('🧹 Token cleared. Please log in again.');
     
-    // Show alert to user
-    alert('Your session has expired. Please log in again.');
-    
-    // Redirect to login page
-    if (window.location.pathname !== '/login') {
-      console.log('🔄 Redirecting to login page...');
-      window.location.href = '/login';
-    }
+    // Show modal to user instead of alert
+    showAuthExpiredModal();
   }
 
   // Check if token is expired and handle accordingly

@@ -299,12 +299,7 @@ async def get_open_orders(
         
         # Debug: Log all orders found
         if len(open_orders) == 0:
-            logger.warning("⚠️ No open orders found! This might indicate:")
-            logger.warning("   1. All orders are from different client IDs")
-            logger.warning("   2. Orders were placed from TWS/Gateway directly (not via API)")
-            logger.warning("   3. reqAllOpenOrders() events haven't arrived yet")
-            logger.warning(f"   Current client ID: {settings.IB_CLIENT_ID}")
-            logger.warning("   Try checking TWS/Gateway manually for open orders")
+            logger.debug("No open orders found")
         else:
             logger.info(f"✅ Successfully retrieved {len(open_orders)} open orders")
         
@@ -612,14 +607,7 @@ async def get_open_orders(
         logger.info(f"   Final orders array length: {len(orders)}")
         logger.info("=" * 80)
         logger.info(f"📊 GET /orders/open - Returning {len(orders)} orders")
-        if len(orders) == 0:
-            logger.warning("⚠️ WARNING: Returning 0 orders, but there may be orders in the account!")
-            logger.warning("   This could mean:")
-            logger.warning("   1. Orders were placed from TWS/Gateway directly (client ID 0)")
-            logger.warning("   2. Orders were placed with a different client ID")
-            logger.warning("   3. reqAllOpenOrders() events didn't arrive in time")
-            logger.warning(f"   Current API client ID: {settings.IB_CLIENT_ID}")
-        else:
+        if len(orders) > 0:
             for i, order in enumerate(orders, 1):
                 logger.info(f"   Order {i}: ID={order.get('order_id')}, Symbol={order.get('symbol')}, Action={order.get('action')}, Status={order.get('status')}, Remaining={order.get('remaining')}")
         logger.info("=" * 80)

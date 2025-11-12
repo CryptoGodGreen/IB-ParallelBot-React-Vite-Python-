@@ -1,51 +1,54 @@
 import { useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
-import Navbar from "./Component/Navbar";
-import Sidebar from "./Component/Sidebar";
-import Home from "./Component/pages/Home";
-import Login from "./Component/pages/Login";
-import Profile from "./Component/pages/Profile";
-import ChangePassword from "./Component/pages/ChangePassword";
-import TradingViewWidget from "./Component/pages/TradingView";
-import TradingDashboard from "./Component/pages/TradingDashboard";
+import HeaderBar from "./components/layout/HeaderBar";
+import Home from "./components/pages/Home";
+import Login from "./components/pages/Login";
+import Profile from "./components/pages/Profile";
+import ChangePassword from "./components/pages/ChangePassword";
+import TradingViewWidget from "./components/pages/TradingView";
+import TradingDashboard from "./components/pages/TradingDashboard";
+import CurrentBots from "./components/pages/CurrentBots";
+import AllBots from "./components/pages/AllBots";
+import OpenOrders from "./components/pages/OpenOrders";
+import Status from "./components/pages/Status";
+import Report from "./components/pages/Report";
+import Configuration from "./components/pages/Configuration";
+import RestartProcesses from "./components/pages/RestartProcesses";
+import AuthExpiredModal from "./components/common/AuthExpiredModal";
+import { useAuthExpired } from "./hooks/useAuthExpired";
 import { AuthContext } from "./context/AuthContext";
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(
     Boolean(localStorage.getItem("token"))
   );
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const location = useLocation();
-
-  const toggleSidebar = () => {
-    setIsSidebarOpen((prev) => {
-      const next = !prev;
-      // Trigger resize so layouts (e.g., charts) recalc during/after toggle
-      try { window.dispatchEvent(new Event('resize')); } catch (_) {}
-      setTimeout(() => { try { window.dispatchEvent(new Event('resize')); } catch (_) {} }, 16);
-      setTimeout(() => { try { window.dispatchEvent(new Event('resize')); } catch (_) {} }, 320);
-      return next;
-    });
-  };
+  const { isOpen: isAuthExpiredOpen, hide: hideAuthExpired } = useAuthExpired();
 
   const bareRoutes = ["/login"]; 
-  const noSidebarRoutes = ["/trading-dashboard"];
+  const headerBarRoutes = ["/", "/current-bots", "/all-bots", "/open-orders", "/status", "/report", "/configuration", "/restart-processes"];
   const isBare = bareRoutes.includes(location.pathname);
-  const hideSidebar = noSidebarRoutes.includes(location.pathname);
+  const hideSidebar = true; // Always hide sidebar - removed MARKETS panel
+  const showHeaderBar = isAuthenticated && headerBarRoutes.includes(location.pathname);
 
   return (
     <AuthContext.Provider value={{ isAuthenticated, setIsAuthenticated }}>
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white">
-        {!isBare && (
-          <Navbar isSidebarOpen={isSidebarOpen} toggleSidebar={toggleSidebar} />
-        )}
-        <div className={`flex ${isBare ? "" : "pt-16"}`}>
-          {!isBare && !hideSidebar && (
-            <Sidebar isOpen={isSidebarOpen} toggleSidebar={toggleSidebar} />
-          )}
-          <main className={`flex-1 min-w-0 ${!isBare && !hideSidebar && isSidebarOpen ? "p-6" : "p-4"}`}>
+        {showHeaderBar && <HeaderBar />}
+        <AuthExpiredModal isOpen={isAuthExpiredOpen} onClose={hideAuthExpired} />
+        <div className={`flex ${isBare ? "" : showHeaderBar ? "pt-12" : "pt-0"}`}>
+          <main className="flex-1 min-w-0 p-4">
             <Routes>
-              <Route path="/" element={<Home />} />
+              <Route 
+                path="/" 
+                element={
+                  isAuthenticated ? (
+                    <div className="no-padding">
+                      <TradingDashboard />
+                    </div>
+                  ) : <Navigate to="/login" replace />
+                } 
+              />
               <Route path="/login" element={<Login />} />
               <Route
                 path="/profile"
@@ -73,6 +76,48 @@ export default function App() {
                     </div>
                   ) : <Navigate to="/login" replace />
                 } 
+              />
+              <Route
+                path="/current-bots"
+                element={
+                  isAuthenticated ? <CurrentBots /> : <Navigate to="/login" replace />
+                }
+              />
+              <Route
+                path="/all-bots"
+                element={
+                  isAuthenticated ? <AllBots /> : <Navigate to="/login" replace />
+                }
+              />
+              <Route
+                path="/open-orders"
+                element={
+                  isAuthenticated ? <OpenOrders /> : <Navigate to="/login" replace />
+                }
+              />
+              <Route
+                path="/status"
+                element={
+                  isAuthenticated ? <Status /> : <Navigate to="/login" replace />
+                }
+              />
+              <Route
+                path="/report"
+                element={
+                  isAuthenticated ? <Report /> : <Navigate to="/login" replace />
+                }
+              />
+              <Route
+                path="/configuration"
+                element={
+                  isAuthenticated ? <Configuration /> : <Navigate to="/login" replace />
+                }
+              />
+              <Route
+                path="/restart-processes"
+                element={
+                  isAuthenticated ? <RestartProcesses /> : <Navigate to="/login" replace />
+                }
               />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

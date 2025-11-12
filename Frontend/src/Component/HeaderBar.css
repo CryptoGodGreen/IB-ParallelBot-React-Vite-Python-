@@ -1,0 +1,88 @@
+.header-bar {
+  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  border-bottom: 1px solid rgba(71, 85, 105, 0.3);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  position: fixed;
+  top: 64px; /* Below the Navbar which is h-16 (64px) */
+  left: 0;
+  right: 0;
+  z-index: 35; /* Above content but below Navbar (z-40) */
+  width: 100%;
+  height: 48px; /* Fixed height for consistent spacing */
+}
+
+.header-nav {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0;
+  max-width: 100%;
+  height: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
+}
+
+.header-nav::-webkit-scrollbar {
+  height: 4px;
+}
+
+.header-nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.header-nav::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 2px;
+}
+
+.header-nav::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 20px;
+  color: #cbd5e1;
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 14px;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+  border-bottom: 2px solid transparent;
+  position: relative;
+  background: transparent;
+}
+
+.nav-item:hover {
+  color: #ffffff;
+  background: rgba(59, 130, 246, 0.1);
+  border-bottom-color: rgba(59, 130, 246, 0.3);
+}
+
+.nav-item.active {
+  color: #60a5fa;
+  border-bottom-color: #3b82f6;
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+  opacity: 0.6;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .nav-item {
+    padding: 10px 16px;
+    font-size: 13px;
+  }
+}
+

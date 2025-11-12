@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import tradingService from '../services/trading/TradingService.js';
-import chartService from '../services/chartService.js';
+import tradingService from '../../services/trading/TradingService.js';
+import chartService from '../../services/chartService.js';
 import './BotConfigPanel.css';
 
 const BotConfigPanel = ({ 
@@ -85,6 +85,7 @@ const BotConfigPanel = ({
     }
 
     if (isBought) {
+      // Priority 1: Check if fully sold first
       if (openShares <= 0) {
         return '🔴 SOLD_100%';
       } else if (sharesExited > 0) {
@@ -101,10 +102,12 @@ const BotConfigPanel = ({
         } else {
           return '🟢 SOLD_25%'; // Minimum for any partial fill
         }
-      } else {
-        // Multi-buy partial fill handling
-        if (multiBuy === 'enabled' && sharesEntered > 0 && positionSize > 0) {
-          const buyPercentage = (sharesEntered / positionSize) * 100;
+      }
+      // Priority 3: Check if multi-buy mode and partially filled (before checking for full BOUGHT)
+      else if (multiBuy === 'enabled' && sharesEntered > 0 && positionSize > 0 && sharesExited === 0) {
+        const buyPercentage = (sharesEntered / positionSize) * 100;
+        // If we have partial position (not 100% bought yet)
+        if (buyPercentage < 100) {
           if (buyPercentage >= 87.5) {
             return '🟢 BUY_100%';
           } else if (buyPercentage >= 62.5) {
@@ -114,9 +117,12 @@ const BotConfigPanel = ({
           } else if (buyPercentage >= 12.5) {
             return '🟢 BUY_25%';
           } else {
-            return '🟢 BUY_25%';
+            return '🟢 BUY_25%'; // Minimum for any partial fill
           }
+        } else {
+          return '🟢 BOUGHT';
         }
+      } else {
         return '🟢 BOUGHT';
       }
     } else {
@@ -130,7 +136,6 @@ const BotConfigPanel = ({
         if (buyPercentage >= 62.5) return '🟢 BUY_75%';
         if (buyPercentage >= 37.5) return '🟢 BUY_50%';
         if (buyPercentage >= 12.5) return '🟢 BUY_25%';
-        return '🟢 BUY_25%';
       }
       return '⚪ NO POSITION';
     }
@@ -170,6 +175,7 @@ const BotConfigPanel = ({
           maxPosition: bot.max_position,
           hardStopTriggered: bot.hard_stop_triggered,
           originalExitLinesCount: bot.original_exit_lines_count,
+          multi_buy: bot.multi_buy,  // Add multi_buy field mapping
           status: bot.status,  // Add status field mapping
           createdAt: bot.created_at,
           updatedAt: bot.updated_at
@@ -255,10 +261,19 @@ const BotConfigPanel = ({
 
   useEffect(() => {
     if (selectedConfig) {
+      // Map all fields from selectedConfig to config state
       setConfig(prev => ({
         ...prev,
-        name: selectedConfig.name || '',
-        symbol: selectedConfig.symbol || 'AAPL'
+        name: selectedConfig.name || prev.name,
+        symbol: selectedConfig.symbol || prev.symbol,
+        ownedBy: selectedConfig.owned_by || prev.ownedBy,
+        trendStrategy: selectedConfig.trend_strategy || prev.trendStrategy || 'uptrend',
+        botPublished: selectedConfig.bot_published !== undefined ? selectedConfig.bot_published : prev.botPublished,
+        tradeAmount: selectedConfig.trade_amount || prev.tradeAmount || 1000,
+        tradeEquityOrOption: selectedConfig.trade_equity_or_option || prev.tradeEquityOrOption || 'Equity',
+        botStopOutTime: selectedConfig.bot_stop_out_time || prev.botStopOutTime || 240,
+        botHardStopOut: selectedConfig.bot_hard_stop_out || prev.botHardStopOut || '3',
+        multiBuy: selectedConfig.multi_buy || prev.multiBuy || 'disabled'
       }));
       
       // Fetch backend bot status
@@ -278,8 +293,11 @@ const BotConfigPanel = ({
     if (!selectedConfig?.id) return;
     
     // Set up polling to refresh bot status every 5 seconds (reduced frequency to avoid DB overload)
-    const interval = setInterval(() => {
-      fetchBackendBotStatus(selectedConfig.id);
+    const interval = setInterval(async () => {
+      await fetchBackendBotStatus(selectedConfig.id);
+      // Also refresh trade history to keep orders table up to date
+      // Use config ID - fetchTradeHistory will find the bot ID if needed
+      fetchTradeHistory(selectedConfig.id, true);
     }, 5000); // Changed from 1000ms to 5000ms (5 seconds)
     
     return () => clearInterval(interval);
@@ -316,7 +334,7 @@ const BotConfigPanel = ({
     const configData = {
       name: config.name,
       symbol: config.symbol,
-      interval: selectedConfig?.interval || '1M', // Use interval from selectedConfig or default to 1M
+      interval: selectedConfig?.interval || '5M', // Use interval from selectedConfig or default to 5M
       rth: true, // Default to true like in ConfigurationPanel
       trade_amount: config.tradeAmount, // Include trade amount for position sizing
       trend_strategy: config.trendStrategy || 'uptrend', // Add trend strategy
@@ -329,7 +347,6 @@ const BotConfigPanel = ({
         other_drawings: null
       },
       // Add bot configuration fields
-      bot_hard_stop_out: config.botHardStopOut || '5', // Hard stop-out percentage (default 5%)
       multi_buy: config.multiBuy || 'disabled' // Multi-buy mode (default disabled)
     };
     
@@ -408,6 +425,194 @@ const BotConfigPanel = ({
     }
   };
 
+  const handleMarketBuy = async () => {
+    if (!selectedConfig?.id) {
+      console.warn('No configuration selected');
+      setOrderStatus({ type: 'error', message: 'No configuration selected' });
+      return;
+    }
+
+    // Use symbol from selectedConfig first, then fallback to config.symbol, then 'AAPL'
+    const symbol = selectedConfig.symbol || config.symbol || 'AAPL';
+    console.log(`🛒 Placing test market buy order for symbol: ${symbol}`);
+    setOrderStatus({ type: 'pending', message: `Placing market buy order for ${symbol}...` });
+
+    try {
+      const result = await chartService.placeMarketBuyOrder(symbol, 1);
+      setOrderStatus({ 
+        type: 'success', 
+        message: `${symbol} order ${result.message} (Order ID: ${result.order_id})` 
+      });
+      console.log(`✅ Market buy order successful for ${symbol}:`, result);
+      
+      // Update bot position state to reflect the test order
+      if (selectedConfig?.id) {
+        const bot = tradingService.activeBots.get(selectedConfig.id);
+        if (bot) {
+          // Simulate a position update for the test order
+          bot.isBought = true;
+          bot.entryPrice = bot.currentPrice || 263.00; // Use current price or default
+          bot.sharesEntered = 1; // Test order was for 1 share
+          bot.totalPosition = 1;
+          bot.openShares = 1;
+          
+          console.log(`🔄 Updated bot position state for test order:`, {
+            isBought: bot.isBought,
+            entryPrice: bot.entryPrice,
+            sharesEntered: bot.sharesEntered,
+            openShares: bot.openShares
+          });
+          
+          // Save test position to localStorage for persistence
+          const testPositionData = {
+            isBought: true,
+            entryPrice: bot.entryPrice,
+            sharesEntered: bot.sharesEntered,
+            totalPosition: bot.totalPosition,
+            openShares: bot.openShares,
+            timestamp: Date.now()
+          };
+          localStorage.setItem(`test_position_${symbol}`, JSON.stringify(testPositionData));
+          console.log(`💾 Saved test position to localStorage for ${symbol}`);
+          
+          // Trigger status update to refresh UI
+          bot.notifyStatusChange('test_position_opened');
+        }
+      }
+    } catch (error) {
+      setOrderStatus({ 
+        type: 'error', 
+        message: `Failed to place ${symbol} order: ${error.message}` 
+      });
+      console.error(`❌ Market buy order failed for ${symbol}:`, error);
+    }
+  };
+
+  const handleMarketSell = async () => {
+    if (!selectedConfig?.id) {
+      console.warn('No configuration selected');
+      setOrderStatus({ type: 'error', message: 'No configuration selected' });
+      return;
+    }
+
+    const symbol = selectedConfig.symbol || config.symbol || 'AAPL';
+    console.log(`🛒 Placing test market sell order for symbol: ${symbol}`);
+    console.log(`🔍 ChartService instance:`, chartService);
+    console.log(`🔍 ChartService methods:`, Object.getOwnPropertyNames(Object.getPrototypeOf(chartService)));
+    
+    setOrderStatus({ type: 'pending', message: `Placing market sell order for ${symbol}...` });
+
+    try {
+      const result = await chartService.placeMarketSellOrder(symbol, 1);
+      setOrderStatus({ 
+        type: 'success', 
+        message: `${symbol} sell order ${result.message} (Order ID: ${result.order_id})` 
+      });
+      console.log(`✅ Market sell order successful for ${symbol}:`, result);
+      
+      // Update bot position state to reflect the test sell order
+      if (selectedConfig?.id) {
+        const bot = tradingService.activeBots.get(selectedConfig.id);
+        if (bot && bot.isBought) {
+          // Close the position
+          bot.isBought = false;
+          bot.sharesExited += bot.openShares;
+          bot.openShares = 0;
+          
+          console.log(`🔄 Closed bot position for test sell order:`, {
+            isBought: bot.isBought,
+            sharesExited: bot.sharesExited,
+            openShares: bot.openShares
+          });
+          
+          // Clear test position from localStorage
+          localStorage.removeItem(`test_position_${symbol}`);
+          console.log(`🗑️ Cleared test position from localStorage for ${symbol}`);
+          
+          // Trigger status update to refresh UI
+          bot.notifyStatusChange('test_position_closed');
+        }
+      }
+    } catch (error) {
+      setOrderStatus({ 
+        type: 'error', 
+        message: `Failed to place ${symbol} sell order: ${error.message}` 
+      });
+      console.error(`❌ Market sell order failed for ${symbol}:`, error);
+    }
+  };
+
+  const handleCancelOrders = async () => {
+    if (!selectedConfig?.id) {
+      console.warn('No configuration selected');
+      setOrderStatus({ type: 'error', message: 'No configuration selected' });
+      return;
+    }
+
+    // Get the actual bot ID from backendBotStatus
+    if (!backendBotStatus?.id) {
+      console.warn('No active bot found for this configuration');
+      setOrderStatus({ type: 'error', message: 'No active bot found for this configuration' });
+      return;
+    }
+
+    const botId = backendBotStatus.id;
+    const configId = selectedConfig.id;
+
+    console.log(`🛑 Cancel Orders - Config ID: ${configId}, Bot ID: ${botId}`);
+    console.log(`🛑 Backend Bot Status:`, backendBotStatus);
+
+    // Show confirmation dialog
+    const confirmed = window.confirm(
+      `Are you sure you want to cancel ALL pending orders for bot ${botId} (config ${configId})?\n\nThis will cancel:\n- Entry orders\n- Exit orders\n- Stop loss orders\n\nThis action cannot be undone.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setOrderStatus({ type: 'pending', message: `Cancelling all orders for bot ${botId}...` });
+
+    try {
+      const response = await fetch(`http://localhost:8000/bots/${botId}/cancel-orders`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${chartService.getAuthToken()}`
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      
+      if (result.success) {
+        setOrderStatus({ 
+          type: 'success', 
+          message: `${result.message}. Cancelled: ${result.cancelled_orders.join(', ')}` 
+        });
+        console.log(`✅ Orders cancelled successfully:`, result);
+        
+        // Refresh bot status to reflect changes
+        await fetchBackendBotStatus(selectedConfig.id);
+      } else {
+        setOrderStatus({ 
+          type: 'error', 
+          message: result.message || 'Failed to cancel orders' 
+        });
+        console.error(`❌ Failed to cancel orders:`, result);
+      }
+      
+    } catch (error) {
+      setOrderStatus({ 
+        type: 'error', 
+        message: `Failed to cancel orders: ${error.message}` 
+      });
+      console.error(`❌ Cancel orders failed:`, error);
+    }
+  };
 
   return (
     <div className="bot-config-panel">
@@ -437,7 +642,7 @@ const BotConfigPanel = ({
         <div className="form-row">
           <label>Trading Strategy:</label>
           <select
-            value={config.trendStrategy || 'uptrend'}
+            value={config.trendStrategy || (selectedConfig?.trend_strategy || 'uptrend')}
             onChange={(e) => handleConfigChange('trendStrategy', e.target.value)}
           >
             <option value="uptrend">📈 Uptrend</option>
@@ -457,10 +662,10 @@ const BotConfigPanel = ({
         </div>
 
         <div className="form-row">
-          <label>Trade Amount (USD):</label>
+          <label>Trade Amount:</label>
           <input
             type="number"
-            value={config.tradeAmount}
+            value={config.tradeAmount || (selectedConfig?.trade_amount || 1000)}
             onChange={(e) => handleConfigChange('tradeAmount', parseInt(e.target.value))}
           />
         </div>
@@ -477,28 +682,9 @@ const BotConfigPanel = ({
         </div>
 
         <div className="form-row">
-          <label>Bot Stop Out Time (min):</label>
-          <input
-            type="number"
-            value={config.botStopOutTime}
-            onChange={(e) => handleConfigChange('botStopOutTime', parseInt(e.target.value))}
-          />
-        </div>
-
-        <div className="form-row">
-          <label>Bot Hard Stop Out %:</label>
-          <input
-            type="text"
-            value={config.botHardStopOut}
-            onChange={(e) => handleConfigChange('botHardStopOut', e.target.value)}
-            placeholder="5"
-          />
-        </div>
-
-        <div className="form-row">
           <label>Multi Buy:</label>
           <select
-            value={config.multiBuy || 'disabled'}
+            value={config.multiBuy || (selectedConfig?.multi_buy || 'disabled')}
             onChange={(e) => handleConfigChange('multiBuy', e.target.value)}
           >
             <option value="disabled">Disabled</option>
@@ -589,40 +775,52 @@ const BotConfigPanel = ({
         <button className="reject-btn" onClick={handleReject}>Emergency</button>
       </div>
 
-      {/* Trade History Table */}
-      {tradeHistory.length > 0 && (
+      {/* Orders Table - Always visible */}
+      {selectedConfig && (
         <div className="trade-history-section">
-          <h3>Trade History</h3>
+          <h3>Orders</h3>
           <div className="trade-history-table">
             <table>
               <thead>
                 <tr>
                   <th>Side</th>
-                  <th>Filled</th>
-                  <th>Target</th>
+                  <th>Status</th>
+                  <th>Type</th>
+                  <th>Price</th>
                   <th>Filled @</th>
-                  <th>Shares Filled</th>
+                  <th>Quantity</th>
                 </tr>
               </thead>
               <tbody>
-                {tradeHistory.map((trade, index) => (
-                  <tr key={index}>
-                    <td className={`side ${trade.side.toLowerCase()}`}>
-                      {trade.side}
+                {tradeHistory.length === 0 ? (
+                  <tr>
+                    <td colSpan="6" className="text-center">
+                      No orders yet
                     </td>
-                    <td className={`filled ${trade.filled.toLowerCase()}`}>
-                      {trade.filled}
-                    </td>
-                    <td>{trade.target}</td>
-                    <td>
-                      {trade.filled_at ? 
-                        new Date(trade.filled_at).toLocaleString() : 
-                        'Pending'
-                      }
-                    </td>
-                    <td>{trade.shares_filled}</td>
                   </tr>
-                ))}
+                ) : (
+                  tradeHistory.map((trade, index) => (
+                    <tr key={index}>
+                      <td className={`side ${trade.side.toLowerCase()}`}>
+                        {trade.side}
+                      </td>
+                      <td className={`filled ${trade.filled.toLowerCase()}`}>
+                        {trade.filled === 'Yes' ? '✅ Filled' : '⏳ Pending'}
+                      </td>
+                      <td>{trade.target}</td>
+                      <td>
+                        {trade.price ? `$${trade.price.toFixed(2)}` : '-'}
+                      </td>
+                      <td>
+                        {trade.filled_at ? 
+                          new Date(trade.filled_at).toLocaleString() : 
+                          '-'
+                        }
+                      </td>
+                      <td>{trade.shares_filled || 0}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

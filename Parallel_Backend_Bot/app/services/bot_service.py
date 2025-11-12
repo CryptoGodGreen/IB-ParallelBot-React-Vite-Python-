@@ -25,6 +25,7 @@ class BotService:
         self.active_bots: Dict[int, Dict] = {}  # In-memory bot state
         self.market_data_service = MarketDataService()
         self._running = False
+        self._price_request_locks: Dict[str, asyncio.Lock] = {}  # Prevent concurrent requests for same symbol
         
     async def start(self):
         """Start the bot service"""
@@ -170,6 +171,7 @@ class BotService:
                 config = config_result.scalar_one_or_none()
                 trend_strategy = config.trend_strategy if config else "uptrend"
                 multi_buy = config.multi_buy if config else "disabled"
+                trade_amount = float(config.trade_amount) if config and config.trade_amount else 1000.0
                 interval = config.interval if config else "1M"  # Get interval from chart config
                 
                 # Get bot configuration settings (global settings)
@@ -295,6 +297,7 @@ class BotService:
                     'name': bot.name,
                     'trend_strategy': trend_strategy,  # Add trend strategy
                     'multi_buy': multi_buy,  # Multi-buy mode
+                    'trade_amount': trade_amount,  # Trade amount in dollars
                     'is_active': bot.is_active,
                     'is_running': bot.is_running,
                     'is_bought': bot.is_bought,
@@ -305,7 +308,7 @@ class BotService:
                     'shares_entered': bot.shares_entered,
                     'shares_exited': bot.shares_exited,
                     'open_shares': bot.open_shares,
-                    'position_size': bot.position_size,
+                    'position_size': bot.position_size,  # Keep for backward compatibility, but use trade_amount for calculations
                     'max_position': bot.max_position,
                     'entry_lines': real_entry_lines,
                     'exit_lines': real_exit_lines,
@@ -1211,87 +1214,55 @@ class BotService:
                 await self._execute_multi_buy_entry_trade(bot_id, line, current_price)
                 return
             
-            # Single buy mode: Place single market buy order
-            order = MarketOrder("BUY", bot_state['position_size'])
+            # Single buy mode: trade_amount is the number of shares to buy
+            trade_amount = bot_state.get('trade_amount', bot_state.get('position_size', 100))
+            shares_to_buy = int(trade_amount)
+            if shares_to_buy < 1:
+                shares_to_buy = 1  # Minimum 1 share
+            
+            logger.info(f"🤖 Bot {bot_id}: Single-buy mode - Buying {shares_to_buy} shares (trade_amount={trade_amount}) at price ${current_price:.2f}")
+            
+            order = MarketOrder("BUY", shares_to_buy)
             trade = await ib_client.place_order(contract, order)
             
             if trade:
                 logger.info(f"✅ Bot {bot_id}: MARKET BUY ORDER PLACED - Order ID: {trade.order.orderId}")
                 
-                # Track position accumulation
-                shares_to_add = bot_state['position_size']
+                # Single buy mode: Execute immediately (multi-buy mode handled separately)
+                bot_state['is_bought'] = True
+                bot_state['entry_price'] = current_price
+                bot_state['shares_entered'] = shares_to_buy
+                bot_state['open_shares'] = shares_to_buy
                 
-                if bot_state.get('multi_buy') == 'enabled' and len(bot_state.get('entry_lines', [])) >= 2:
-                    # Multi-buy mode: Accumulate shares as we cross each entry line
-                    if 'shares_entered' not in bot_state:
-                        bot_state['shares_entered'] = 0
-                        bot_state['open_shares'] = 0
-                        bot_state['entry_price'] = 0
-                    
-                    # Add shares for this crossing
-                    bot_state['shares_entered'] += shares_to_add
-                    bot_state['open_shares'] += shares_to_add
-                    
-                    # Calculate average entry price
-                    total_cost = (bot_state['entry_price'] * (bot_state['shares_entered'] - shares_to_add)) + (current_price * shares_to_add)
-                    bot_state['entry_price'] = total_cost / bot_state['shares_entered'] if bot_state['shares_entered'] > 0 else current_price
-                    
-                    # Check if all entry lines are crossed (position complete)
-                    total_entry_lines = len(bot_state.get('entry_lines', []))
-                    crossed_entry_lines = sum(1 for entry_line in bot_state['entry_lines'] 
-                                             if entry_line['id'] in bot_state['crossed_lines'])
-                    
-                    if crossed_entry_lines >= total_entry_lines:
-                        bot_state['is_bought'] = True
-                        logger.info(f"🤖 Bot {bot_id}: All entry lines crossed! Position complete: {bot_state['shares_entered']} shares @ ${bot_state['entry_price']:.2f}")
-                        
-                        # Place stop-loss order
-                        await self._place_stop_loss_order(bot_id, current_price, bot_state['shares_entered'])
-                        
-                        # Create exit limit orders for all exit lines immediately
-                        await self._create_exit_orders_on_position_open(bot_id, current_price)
-                    else:
-                        logger.info(f"🤖 Bot {bot_id}: Accumulating position: {bot_state['shares_entered']} shares so far (crossed {crossed_entry_lines}/{total_entry_lines} entry lines)")
-                else:
-                    # Single buy mode: Execute immediately
-                    bot_state['is_bought'] = True
-                    bot_state['entry_price'] = current_price
-                    bot_state['shares_entered'] = bot_state['position_size']
-                    bot_state['open_shares'] = bot_state['position_size']
-                    
-                    # Place stop-loss order
-                    await self._place_stop_loss_order(bot_id, current_price, bot_state['position_size'])
-                    
-                    # Create exit limit orders for all exit lines immediately
-                    await self._create_exit_orders_on_position_open(bot_id, current_price)
+                # Update database
+                await self._update_bot_in_db(bot_id, {
+                    'is_bought': True,
+                    'entry_price': current_price,
+                    'shares_entered': shares_to_buy,
+                    'open_shares': shares_to_buy,
+                    'entry_order_status': 'FILLED'
+                })
+                
+                # Log event
+                await self._log_bot_event(bot_id, 'spot_position_opened', {
+                    'entry_price': current_price,
+                    'shares_bought': shares_to_buy,
+                    'order_id': trade.order.orderId,
+                    'strategy': 'uptrend_spot_limit'
+                })
+                
+                logger.info(f"🤖 Bot {bot_id}: Position opened - {shares_to_buy} shares at ${current_price:.2f}")
+                
+                # Place stop-loss order
+                await self._place_stop_loss_order(bot_id, current_price, shares_to_buy)
+                
+                # Create exit limit orders for all exit lines immediately
+                await self._create_exit_orders_on_position_open(bot_id, current_price)
                 
                 bot_state['entry_order_id'] = trade.order.orderId
                 bot_state['entry_order_status'] = 'FILLED'
                 bot_state['entry_order_price'] = current_price
-                bot_state['entry_order_quantity'] = bot_state['position_size']
-                
-                # Update database
-                logger.info(f"🔄 Bot {bot_id}: Updating database with shares_entered={bot_state.get('shares_entered', bot_state['position_size'])}, open_shares={bot_state.get('open_shares', bot_state['position_size'])}")
-                await self._update_bot_in_db(bot_id, {
-                    'is_bought': bot_state.get('is_bought', False),
-                    'entry_price': bot_state.get('entry_price', current_price),
-                    'shares_entered': bot_state.get('shares_entered', bot_state['position_size']),
-                    'open_shares': bot_state.get('open_shares', bot_state['position_size']),
-                    'entry_order_id': trade.order.orderId,
-                    'entry_order_status': 'FILLED'
-                })
-                logger.info(f"✅ Bot {bot_id}: Database updated successfully")
-                
-                logger.info(f"🤖 Bot {bot_id}: MARKET BUY EXECUTED - {shares_to_add} shares at ${current_price}")
-                
-                # Log event
-                await self._log_bot_event(bot_id, 'spot_position_opened', {
-                    'line_price': line['price'],
-                    'current_price': current_price,
-                    'shares_bought': shares_to_add,
-                    'order_id': trade.order.orderId,
-                    'strategy': 'uptrend_spot_market'
-                })
+                bot_state['entry_order_quantity'] = shares_to_buy
             else:
                 logger.error(f"❌ Bot {bot_id}: Failed to place entry market order")
             
@@ -1655,9 +1626,10 @@ class BotService:
                             await self._get_candle_data(bot_state['symbol'], "1 D", "1 min", True)
                         
                         if price > 0:
-                            # Show detailed price information including entry/exit lines
-                            await self._log_detailed_price_info(bot_id, price, bot_state)
+                            # Update bot price first (this checks soft/hard stops and updates state)
                             await self.update_bot_price(bot_id, price)
+                            # Then show detailed price information including entry/exit lines (with updated state)
+                            await self._log_detailed_price_info(bot_id, price, bot_state)
                         else:
                             logger.warning(f"❌ Bot {bot_id}: Invalid price for {bot_state['symbol']}: {price}")
                                 
@@ -1697,77 +1669,113 @@ class BotService:
                 await asyncio.sleep(60)
     
     async def _get_current_price(self, symbol: str) -> float:
-        """Get current price using direct IBKR connection"""
-        try:
-            # First try Redis/IBKR bridge (works with delayed data and Docker feed)
-            price = await ib_interface.retrieve_quote(symbol)
-            if price and price > 0:
-                logger.info(f"✅ Using Redis quote for {symbol}: ${price:.2f}")
-                return float(price)
+        """Get current price using delayed historical data (no real-time subscription required)"""
+        # Get or create lock for this symbol to prevent concurrent requests
+        if symbol not in self._price_request_locks:
+            self._price_request_locks[symbol] = asyncio.Lock()
+        
+        lock = self._price_request_locks[symbol]
+        
+        async with lock:
+            try:
+                # First try Redis/IBKR bridge (works with delayed data and Docker feed)
+                try:
+                    price = await asyncio.wait_for(ib_interface.retrieve_quote(symbol), timeout=3.0)
+                    if price and price > 0:
+                        logger.info(f"✅ Using Redis quote for {symbol}: ${price:.2f}")
+                        return float(price)
+                except asyncio.TimeoutError:
+                    logger.debug(f"⏰ Redis quote timeout for {symbol}")
+                except Exception as e:
+                    logger.debug(f"⚠️ Redis quote error for {symbol}: {e}")
 
-            logger.warning(f"⚠️ Redis quote unavailable for {symbol}; falling back to historical bars")
-
-            # Fall back to historical data (IBKR provides delayed data without real-time subscription)
-            bars = await ib_client.history_bars(symbol, duration="30 M", barSize="1 min", rth=True)
-            if bars:
-                latest_bar = bars[-1]
-                bar_price = getattr(latest_bar, "close", None) or getattr(latest_bar, "average", None) or getattr(latest_bar, "open", None)
-                if bar_price and bar_price > 0:
-                    logger.info(f"✅ Using latest historical bar for {symbol}: close=${bar_price:.2f}")
-                    return float(bar_price)
-                logger.warning(f"⚠️ Historical bar for {symbol} missing usable price: {latest_bar}")
-
-            logger.warning(f"⚠️ Historical data unavailable for {symbol}; requesting snapshot market data as last resort")
-
-            # As a final fallback, request a delayed snapshot from IBKR (may fail without permissions)
-            contract = await ib_client.qualify_stock(symbol)
-            if not contract:
-                logger.error(f"Could not qualify contract for {symbol}")
-                return -1.0
-
-            ticker = ib_client.ib.reqMktData(contract, "", True, False)  # snapshot=True gives delayed data
-            await asyncio.sleep(1.0)
-
-            if ticker.last and ticker.last > 0:
-                logger.info(f"✅ Snapshot price for {symbol}: ${ticker.last:.2f}")
-                return float(ticker.last)
-            if ticker.close and ticker.close > 0:
-                logger.info(f"✅ Snapshot close price for {symbol}: ${ticker.close:.2f}")
-                return float(ticker.close)
-            if ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
-                mid_price = (ticker.bid + ticker.ask) / 2
-                logger.info(f"✅ Snapshot mid-price for {symbol}: ${mid_price:.2f}")
-                return float(mid_price)
-
-            logger.warning(f"No valid snapshot data for {symbol} - last: {ticker.last}, bid: {ticker.bid}, ask: {ticker.ask}, close: {getattr(ticker, 'close', None)}")
-            return -1.0
+                # Fall back to historical bars (IBKR provides delayed data without real-time subscription)
+                # Try multiple durations to ensure we get recent data
+                durations = ["1 D", "2 D", "1 W"]  # Try longer durations if shorter ones fail
+                bar_sizes = ["1 min", "5 mins"]  # Try different bar sizes
                 
-        except Exception as e:
-            logger.error(f"Error getting price for {symbol}: {e}")
-            return -1.0
+                for duration in durations:
+                    for bar_size in bar_sizes:
+                        try:
+                            logger.info(f"📊 Requesting historical bars for {symbol}: duration={duration}, barSize={bar_size}")
+                            
+                            # Add timeout to prevent hanging (IBKR sometimes doesn't respond)
+                            bars = await asyncio.wait_for(
+                                ib_client.history_bars(symbol, duration=duration, barSize=bar_size, rth=True),
+                                timeout=15.0
+                            )
+                            
+                            if bars and len(bars) > 0:
+                                # Get the most recent bar
+                                latest_bar = bars[-1]
+                                bar_price = (
+                                    getattr(latest_bar, "close", None) or 
+                                    getattr(latest_bar, "average", None) or 
+                                    getattr(latest_bar, "open", None) or
+                                    getattr(latest_bar, "high", None)
+                                )
+                                
+                                if bar_price and bar_price > 0:
+                                    # Calculate how old the data is (for logging)
+                                    bar_time = getattr(latest_bar, "date", None)
+                                    logger.info(f"✅ Using latest historical bar for {symbol}: close=${bar_price:.2f}, duration={duration}, barSize={bar_size}, bars={len(bars)}, bar_time={bar_time}")
+                                    return float(bar_price)
+                                
+                                logger.warning(f"⚠️ Historical bar for {symbol} missing usable price: {latest_bar}")
+                            else:
+                                logger.warning(f"⚠️ No bars returned for {symbol} with duration={duration}, barSize={bar_size}")
+                                
+                        except asyncio.TimeoutError:
+                            logger.warning(f"⏰ Historical bars request timeout for {symbol} (duration={duration}, barSize={bar_size})")
+                            continue
+                        except Exception as e:
+                            logger.warning(f"⚠️ Historical bars error for {symbol} (duration={duration}, barSize={bar_size}): {e}")
+                            # Wait a bit before retrying to avoid overwhelming IBKR
+                            await asyncio.sleep(0.5)
+                            continue
+
+                logger.error(f"❌ All price retrieval methods failed for {symbol}")
+                return -1.0
+                    
+            except Exception as e:
+                logger.error(f"❌ Error getting price for {symbol}: {e}", exc_info=True)
+                return -1.0
     
     async def _get_candle_data(self, symbol: str, duration: str = "1 D", bar_size: str = "1 min", rth: bool = True) -> list:
         """Get recent candle/bar data for analysis"""
-        try:
-            logger.info(f"📊 Getting candle data for {symbol}: {duration}, {bar_size}")
-            
-            # Get historical bars
-            bars = await ib_client.history_bars(symbol, duration, bar_size, rth)
-            
-            if bars:
-                logger.info(f"✅ Got {len(bars)} bars for {symbol}")
-                # Log the most recent bar
-                latest_bar = bars[-1] if bars else None
-                if latest_bar:
-                    logger.info(f"📊 Latest bar: O={latest_bar.open:.2f}, H={latest_bar.high:.2f}, L={latest_bar.low:.2f}, C={latest_bar.close:.2f}, V={latest_bar.volume}")
-                return bars
-            else:
-                logger.warning(f"No candle data received for {symbol}")
-                return []
+        # Use same lock to prevent concurrent requests
+        if symbol not in self._price_request_locks:
+            self._price_request_locks[symbol] = asyncio.Lock()
+        
+        lock = self._price_request_locks[symbol]
+        
+        async with lock:
+            try:
+                logger.info(f"📊 Getting candle data for {symbol}: {duration}, {bar_size}")
                 
-        except Exception as e:
-            logger.error(f"Error getting candle data for {symbol}: {e}")
-            return []
+                # Add timeout to prevent hanging
+                bars = await asyncio.wait_for(
+                    ib_client.history_bars(symbol, duration, bar_size, rth),
+                    timeout=15.0
+                )
+                
+                if bars:
+                    logger.info(f"✅ Got {len(bars)} bars for {symbol}")
+                    # Log the most recent bar
+                    latest_bar = bars[-1] if bars else None
+                    if latest_bar:
+                        logger.info(f"📊 Latest bar: O={latest_bar.open:.2f}, H={latest_bar.high:.2f}, L={latest_bar.low:.2f}, C={latest_bar.close:.2f}, V={latest_bar.volume}")
+                    return bars
+                else:
+                    logger.warning(f"No candle data received for {symbol}")
+                    return []
+                    
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ Candle data request timeout for {symbol}")
+                return []
+            except Exception as e:
+                logger.error(f"Error getting candle data for {symbol}: {e}")
+                return []
     
     async def _log_detailed_price_info(self, bot_id: int, current_price: float, bot_state: dict):
         """Log detailed price information including entry/exit lines"""
@@ -1934,6 +1942,46 @@ class BotService:
                     direction_to_stop = "ABOVE" if distance_to_stop > 0 else "BELOW"
                     price_info += f"\n🛑 Hard Stop-Out: ${stop_out_price:.2f} ({abs(distance_to_stop):.2f} {direction_to_stop}) [{hard_stop_out_pct}%]"
             
+            # Show soft stop timer information if configured and bot has position
+            soft_stop_pct = bot_state.get('soft_stop_pct', 0.0)
+            soft_stop_minutes = bot_state.get('soft_stop_minutes', 5)
+            soft_stop_timer_active = bot_state.get('soft_stop_timer_active', False)
+            soft_stop_timer_start = bot_state.get('soft_stop_timer_start', None)
+            
+            if soft_stop_pct > 0 and is_bought:
+                entry_price = bot_state.get('entry_price', 0)
+                if entry_price > 0:
+                    # Convert entry_price to float to avoid Decimal type errors
+                    entry_price = float(entry_price)
+                    soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
+                    distance_to_soft_stop = current_price - soft_stop_price
+                    direction_to_soft_stop = "ABOVE" if distance_to_soft_stop > 0 else "BELOW"
+                    
+                    # Check if price is below soft stop
+                    if current_price <= soft_stop_price:
+                        # Price is below soft stop - show timer status
+                        if soft_stop_timer_active and soft_stop_timer_start:
+                            elapsed_seconds = time.time() - soft_stop_timer_start
+                            elapsed_minutes = elapsed_seconds / 60
+                            remaining_seconds = max(0, (soft_stop_minutes * 60) - elapsed_seconds)
+                            remaining_minutes = int(remaining_seconds // 60)
+                            remaining_secs = int(remaining_seconds % 60)
+                            
+                            if remaining_seconds > 0:
+                                price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - ACTIVE: {remaining_minutes}m {remaining_secs}s remaining (expires in {elapsed_minutes:.1f}/{soft_stop_minutes}min)"
+                            else:
+                                price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - EXPIRED (selling...)"
+                        else:
+                            # Timer should start immediately, but if it's not active yet, show starting
+                            price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - STARTING ({soft_stop_minutes}min timer)"
+                    else:
+                        # Price is above soft stop - show inactive status
+                        if soft_stop_timer_active:
+                            # Timer was active but price recovered - should be reset by check
+                            price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - RESET (price recovered above stop)"
+                        else:
+                            price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - INACTIVE (price above stop)"
+            
             # Show open limit orders
             price_info = await self._log_open_orders(bot_id, bot_state, price_info)
             
@@ -2073,7 +2121,7 @@ class BotService:
             return sum(prices) / len(prices)
     
     async def _execute_multi_buy_entry_trade(self, bot_id: int, line, current_price: float):
-        """Execute single multi-buy order when price crosses one entry line (30/20/20/30 split)"""
+        """Execute multi-buy order when price crosses one of the 2 entry lines (50/50 split)"""
         try:
             bot_state = self.active_bots[bot_id]
             
@@ -2082,60 +2130,46 @@ class BotService:
                 return
             
             entry_lines = bot_state['entry_lines']
-            second_line = entry_lines[0]  # Higher line (2nd buy line)
-            first_line = entry_lines[1]   # Lower line (1st buy line)
+            # In multi-buy mode, entry_lines[0] is the first (lower) entry line
+            # and entry_lines[1] is the second (higher) entry line
+            first_line = entry_lines[0]   # Lower entry line (1st buy line)
+            second_line = entry_lines[1]  # Higher entry line (2nd buy line)
             
-            # Calculate prices for the 4 entry points
-            second_price = self._calculate_trend_line_price(second_line['points'])
-            first_price = self._calculate_trend_line_price(first_line['points'])
+            # trade_amount is the total number of shares to buy across the 2 entry lines
+            trade_amount = bot_state.get('trade_amount', bot_state.get('position_size', 100))
+            total_shares = int(trade_amount)
+            if total_shares < 1:
+                total_shares = 1  # Minimum 1 share
             
-            # Calculate intermediate prices (1/3 and 2/3 of the way down from 2nd to 1st)
-            price_diff = second_price - first_price
-            third_price = second_price - (price_diff / 3)  # 1/3 way down
-            two_thirds_price = second_price - (2 * price_diff / 3)  # 2/3 way down
+            # Split shares 50/50 between the 2 entry lines
+            shares_per_line = total_shares // 2
+            shares_at_first = shares_per_line
+            shares_at_second = total_shares - shares_at_first  # Second line gets remainder to ensure total is correct
             
-            # Calculate share amounts (30%, 20%, 20%, 30% of total)
-            total_shares = bot_state['position_size']
-            shares_at_second = int(total_shares * 0.30)
-            shares_at_third = int(total_shares * 0.20)
-            shares_at_two_thirds = int(total_shares * 0.20)
-            shares_at_first = total_shares - shares_at_second - shares_at_third - shares_at_two_thirds  # Remainder
+            logger.info(f"🤖 Bot {bot_id}: Multi-buy mode - trade_amount={trade_amount} shares total, splitting 50/50: 1st line={shares_at_first}, 2nd line={shares_at_second}")
             
-            # Determine which order to place based on which line was crossed
             # Initialize multi_buy_tracker if not exists
             if 'multi_buy_tracker' not in bot_state:
                 bot_state['multi_buy_tracker'] = {
-                    'second_filled': False,
-                    'third_filled': False,
-                    'two_thirds_filled': False,
                     'first_filled': False,
+                    'second_filled': False,
                     'total_shares_bought': 0
                 }
             
             tracker = bot_state['multi_buy_tracker']
             shares_to_buy = 0
             
-            # Check which price level was crossed and place corresponding order
-            if line['id'] == second_line['id'] and not tracker['second_filled']:
-                # Price crossed 2nd entry line (highest)
-                shares_to_buy = shares_at_second
-                tracker['second_filled'] = True
-                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 2nd entry line - buying {shares_to_buy} shares (30%)")
-            elif current_price <= third_price and not tracker['third_filled']:
-                # Price reached 1/3 way down
-                shares_to_buy = shares_at_third
-                tracker['third_filled'] = True
-                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 1/3 level - buying {shares_to_buy} shares (20%)")
-            elif current_price <= two_thirds_price and not tracker['two_thirds_filled']:
-                # Price reached 2/3 way down
-                shares_to_buy = shares_at_two_thirds
-                tracker['two_thirds_filled'] = True
-                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 2/3 level - buying {shares_to_buy} shares (20%)")
-            elif line['id'] == first_line['id'] and not tracker['first_filled']:
-                # Price crossed 1st entry line (lowest)
+            # Check which entry line was crossed and place corresponding order
+            if line['id'] == first_line['id'] and not tracker['first_filled']:
+                # Price crossed 1st entry line (lower)
                 shares_to_buy = shares_at_first
                 tracker['first_filled'] = True
-                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 1st entry line - buying {shares_to_buy} shares (30%)")
+                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 1st entry line (lower) - buying {shares_to_buy} shares")
+            elif line['id'] == second_line['id'] and not tracker['second_filled']:
+                # Price crossed 2nd entry line (higher)
+                shares_to_buy = shares_at_second
+                tracker['second_filled'] = True
+                logger.info(f"🤖 Bot {bot_id}: Multi-buy crossing 2nd entry line (higher) - buying {shares_to_buy} shares")
             
             if shares_to_buy == 0:
                 logger.info(f"🤖 Bot {bot_id}: Multi-buy order already placed for this crossing")
@@ -2173,13 +2207,13 @@ class BotService:
                     'entry_order_status': 'FILLED'
                 })
                 
-                # If all 4 orders are filled, create exit orders
-                if tracker['second_filled'] and tracker['third_filled'] and tracker['two_thirds_filled'] and tracker['first_filled']:
+                # If both entry lines are filled, create exit orders
+                if tracker['first_filled'] and tracker['second_filled']:
                     logger.info(f"✅ Bot {bot_id}: All multi-buy orders placed ({tracker['total_shares_bought']} shares)")
                     # Create exit limit orders for all exit lines
                     await self._create_exit_orders_on_position_open(bot_id, current_price)
-                    # Place stop-loss order
-                    await self._place_stop_loss_order(bot_id, current_price, bot_state['position_size'])
+                    # Place stop-loss order using actual shares bought
+                    await self._place_stop_loss_order(bot_id, bot_state['entry_price'], tracker['total_shares_bought'])
             else:
                 logger.error(f"❌ Bot {bot_id}: Failed to place multi-buy market order for {shares_to_buy} shares")
             

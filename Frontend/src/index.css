@@ -12,3 +12,16 @@ html { scroll-behavior: smooth; }
 /* Glow ring utility */
 .glow-ring { box-shadow: 0 0 0 2px rgba(59,130,246,.25), 0 0 40px rgba(59,130,246,.15) inset; }
 
+/* Page container styles */
+.page-container {
+  @apply p-6;
+}
+
+.page-title {
+  @apply text-3xl font-bold text-white mb-2;
+}
+
+.page-description {
+  @apply text-slate-400 text-lg mb-6;
+}
+

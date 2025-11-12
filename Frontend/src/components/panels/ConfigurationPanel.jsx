@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import ConfirmModal from '../components/common/ConfirmModal';
+import ConfirmModal from '../common/ConfirmModal';
 import './ConfigurationPanel.css';
 
 const ConfigurationPanel = ({ 
@@ -14,7 +14,7 @@ const ConfigurationPanel = ({
   const [newConfig, setNewConfig] = useState({
     name: '',
     symbol: 'AAPL',
-    interval: '1M'
+    interval: '5M'
   });
   const [deleteTargetId, setDeleteTargetId] = useState(null);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
@@ -40,7 +40,7 @@ const ConfigurationPanel = ({
       };
       
       console.log('🔧 Calling onConfigCreate with:', configData);
-      setNewConfig({ name: '', symbol: 'AAPL', interval: '1M' });
+      setNewConfig({ name: '', symbol: 'AAPL', interval: '5M' });
       setShowNewConfigForm(false);
       onConfigCreate(configData);
     } else {
