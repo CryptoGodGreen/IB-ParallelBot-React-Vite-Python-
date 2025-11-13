@@ -208,6 +208,7 @@ class BotService:
                 real_entry_lines = []
                 real_exit_lines = []
                 upward_lines = []  # For UPTREND: collect all upward lines first
+                downward_lines = []  # For DOWNTREND: collect all downward lines first
                 if config and config.layout_data:
                     layout = config.layout_data
                     
@@ -239,9 +240,10 @@ class BotService:
                                             })
                                             line_counter += 1
                                     else:  # downtrend
-                                        # DOWNTREND OPTIONS: Downward lines = Entry, Upward lines = Exit
-                                        if price_diff < 0:  # Downward trend = Entry line
-                                            real_entry_lines.append({
+                                        # DOWNTREND OPTIONS: Top (highest) downward line = Entry, Remaining downward lines = Exit
+                                        if price_diff < 0:  # Downward trend line
+                                            # Store all downward lines first, then sort and assign
+                                            downward_lines.append({
                                                 'price': current_price,
                                                 'is_active': True,
                                                 'id': f"line_{line_counter}",  # Use unique string ID
@@ -256,6 +258,22 @@ class BotService:
                                                 'points': drawing['points']  # Store points for recalculation
                                             })
                                             line_counter += 1
+                    
+                    # For DOWNTREND: Sort downward lines and assign top (highest) as entry, rest as exit
+                    if trend_strategy == 'downtrend' and downward_lines:
+                        # Sort downward lines by price (highest to lowest)
+                        downward_lines.sort(key=lambda x: x['price'], reverse=True)
+                        logger.info(f"🎯 Bot {bot_id}: Sorted {len(downward_lines)} downward lines for options trading")
+                        
+                        # Top (highest) downward line = Entry (option bid)
+                        if len(downward_lines) > 0:
+                            real_entry_lines.append(downward_lines[0])  # Highest downward line = Entry
+                            logger.info(f"🎯 Bot {bot_id}: Added entry line (option bid) at ${downward_lines[0]['price']:.2f}")
+                        
+                        # Remaining downward lines = Exit (option ask)
+                        for i in range(1, len(downward_lines)):
+                            real_exit_lines.append(downward_lines[i])
+                            logger.info(f"🎯 Bot {bot_id}: Added exit line (option ask) at ${downward_lines[i]['price']:.2f}")
                     
                     # For UPTREND: Sort upward lines and assign based on multi-buy setting
                     if trend_strategy == 'uptrend' and upward_lines:
@@ -571,6 +589,32 @@ class BotService:
                         logger.info(f"🔄 Bot {bot_id}: Exit order {key} not tracked (non-dict): {value}")
             
             logger.info(f"🔄 Bot {bot_id}: Found {exit_orders_found} pending exit orders")
+            
+            # Ensure exit orders exist every cycle if bot has a position
+            if bot_state.get('is_bought') == True:
+                # Check if we have exit lines but no active exit orders
+                exit_lines = bot_state.get('exit_lines', [])
+                if exit_lines and exit_orders_found == 0:
+                    logger.info(f"🔄 Bot {bot_id}: Position is open but no active exit orders found - resubmitting exit orders")
+                    await self._create_exit_orders_on_position_open(bot_id, current_price, force_resubmit=False)
+                elif exit_lines:
+                    # Check if all exit lines have orders, if not, resubmit missing ones
+                    active_exit_statuses_check = {
+                        'PENDING', 'SUBMITTED', 'PRESUBMITTED', 'PENDINGSUBMIT',
+                        'PENDING_SUBMIT', 'WORKING', 'UNKNOWN', 'API_PENDING'
+                    }
+                    exit_lines_with_orders = 0
+                    for exit_line in exit_lines:
+                        exit_order_key = f"exit_order_{exit_line['id']}"
+                        existing_order = bot_state.get(exit_order_key)
+                        if existing_order and isinstance(existing_order, dict):
+                            status = (existing_order.get('status') or 'PENDING').upper()
+                            if status in active_exit_statuses_check:
+                                exit_lines_with_orders += 1
+                    
+                    if exit_lines_with_orders < len(exit_lines):
+                        logger.info(f"🔄 Bot {bot_id}: Only {exit_lines_with_orders} out of {len(exit_lines)} exit lines have active orders - resubmitting missing exit orders")
+                        await self._create_exit_orders_on_position_open(bot_id, current_price, force_resubmit=False)
                     
         except Exception as e:
             logger.error(f"Error monitoring orders for bot {bot_id}: {e}")
@@ -606,7 +650,17 @@ class BotService:
                     'entry_order_status': 'FILLED'
                 })
                 
-                # Log event
+                # Log entry order event (for limit orders that were just filled)
+                await self._log_bot_event(bot_id, 'spot_entry_limit_order', {
+                    'line_price': bot_state.get('entry_order_price', bot_state['entry_price']),
+                    'current_price': current_price,
+                    'shares_bought': bot_state['shares_entered'],
+                    'order_id': order_id,
+                    'order_status': 'FILLED',
+                    'strategy': 'uptrend_spot_limit'
+                })
+                
+                # Log position opened event
                 await self._log_bot_event(bot_id, 'spot_position_opened', {
                     'entry_price': bot_state['entry_price'],
                     'shares_bought': bot_state['shares_entered'],
@@ -642,12 +696,36 @@ class BotService:
             order_status = await ib_client.get_order_status(order_id)
             logger.info(f"🔄 Bot {bot_id}: Order {order_id} status: {order_status}")
             
-            # Check if current price is above exit line (manual fill detection)
-            exit_line_price = order_info.get('price', 0)
+            # Recalculate exit line price from trend line for accurate comparison
+            line_id = order_info.get('line_id', '')
+            exit_line_price = order_info.get('price', 0)  # Fallback to stored price
+            exit_line = None
+            
+            # Find the exit line for this order
+            for exit_line_candidate in bot_state.get('exit_lines', []):
+                if exit_line_candidate.get('id') == line_id:
+                    exit_line = exit_line_candidate
+                    break
+            
+            if exit_line and exit_line.get('points'):
+                # Recalculate exit line price from trend line points
+                exit_line_price_calculated = self._calculate_trend_line_price(exit_line['points'])
+                
+                # Get contract specs to round price to minimum tick
+                specs = ib_client.get_specs(bot_state['symbol'])
+                min_tick = specs.get('min_tick', 0.01) if specs else 0.01
+                
+                # Round price to minimum tick
+                def round_to_tick(price: float, tick: float) -> float:
+                    return round(round(price / tick) * tick, 6)
+                
+                exit_line_price = round_to_tick(exit_line_price_calculated, min_tick)
+            
             logger.info(f"🎯 Bot {bot_id}: Manual fill check - Current: ${current_price:.2f}, Exit line: ${exit_line_price:.2f}, Order status: {order_status}")
             
-            if current_price > exit_line_price and order_status in ['Unknown', 'Submitted', 'Pending']:
-                logger.info(f"🎯 Bot {bot_id}: Current price ${current_price:.2f} > Exit line ${exit_line_price:.2f}, marking as filled (status was: {order_status})")
+            # Check if current price is above exit line (manual fill detection)
+            if current_price >= exit_line_price and order_status in ['Unknown', 'Submitted', 'Pending', 'PreSubmitted']:
+                logger.info(f"🎯 Bot {bot_id}: Current price ${current_price:.2f} >= Exit line ${exit_line_price:.2f}, marking as filled (status was: {order_status})")
                 order_status = 'Filled'
             
             if order_status == 'Filled':
@@ -655,11 +733,47 @@ class BotService:
                 
                 # Update bot state
                 shares_sold = order_info['quantity']
+                exit_line_price = order_info.get('price', 0)
+                line_id = order_info.get('line_id', '')
                 bot_state['shares_exited'] += shares_sold
                 bot_state['open_shares'] -= shares_sold
                 order_info['status'] = 'FILLED'
                 
-                # Check if all shares are sold
+                # Update database
+                logger.info(f"🔄 Bot {bot_id}: Updating database - shares_exited={bot_state['shares_exited']}, open_shares={bot_state['open_shares']}")
+                db_update = {
+                    'is_bought': bot_state['is_bought'],
+                    'shares_exited': bot_state['shares_exited'],
+                    'open_shares': bot_state['open_shares'],
+                    f'{order_key}_status': 'FILLED'  # Update exit order status in database
+                }
+                await self._update_bot_in_db(bot_id, db_update)
+                
+                # Log exit order filled event (so frontend shows the exit order as filled)
+                await self._log_bot_event(bot_id, 'spot_exit_limit_order', {
+                    'line_price': exit_line_price,
+                    'current_price': current_price,
+                    'shares_to_sell': shares_sold,
+                    'order_id': order_id,
+                    'order_status': 'FILLED',
+                    'line_id': line_id,
+                    'strategy': 'uptrend_spot_limit'
+                })
+                
+                # Log partial exit event (for position tracking)
+                await self._log_bot_event(bot_id, 'spot_position_partial_exit', {
+                    'shares_sold': shares_sold,
+                    'remaining_shares': bot_state['open_shares'],
+                    'total_exited': bot_state['shares_exited'],
+                    'order_id': order_id,
+                    'line_price': exit_line_price,
+                    'line_id': line_id,
+                    'strategy': 'uptrend_spot_limit'
+                })
+                
+                logger.info(f"🤖 Bot {bot_id}: Sold {shares_sold} shares at ${exit_line_price:.2f}, {bot_state['open_shares']} remaining")
+                
+                # Check if all shares are sold - if so, complete the bot
                 if bot_state['open_shares'] <= 0:
                     bot_state['is_bought'] = False
                     bot_state['crossed_lines'] = set()
@@ -667,34 +781,40 @@ class BotService:
                     await self._complete_bot(bot_id)
                     return  # Exit early since bot is completed
                 
-                # Update database
-                logger.info(f"🔄 Bot {bot_id}: Updating database - shares_exited={bot_state['shares_exited']}, open_shares={bot_state['open_shares']}")
-                await self._update_bot_in_db(bot_id, {
-                    'is_bought': bot_state['is_bought'],
-                    'shares_exited': bot_state['shares_exited'],
-                    'open_shares': bot_state['open_shares']
-                })
+            elif should_update_prices and order_status in ['Submitted', 'Unknown', 'Pending', 'PreSubmitted']:
+                # Recalculate exit line price from trend line (not current market price)
+                line_id = order_info.get('line_id', '')
+                exit_line = None
                 
-                # Log event
-                await self._log_bot_event(bot_id, 'spot_position_partial_exit', {
-                    'shares_sold': shares_sold,
-                    'remaining_shares': bot_state['open_shares'],
-                    'total_exited': bot_state['shares_exited'],
-                    'order_id': order_id,
-                    'strategy': 'uptrend_spot_limit'
-                })
+                # Find the exit line for this order
+                for exit_line_candidate in bot_state.get('exit_lines', []):
+                    if exit_line_candidate.get('id') == line_id:
+                        exit_line = exit_line_candidate
+                        break
                 
-                logger.info(f"🤖 Bot {bot_id}: Sold {shares_sold} shares, {bot_state['open_shares']} remaining")
-                
-                # Check if all shares are sold - if so, complete the bot
-                if bot_state['open_shares'] <= 0:
-                    logger.info(f"🎉 Bot {bot_id}: All shares sold! Completing bot...")
-                    await self._complete_bot(bot_id)
-                
-            elif should_update_prices and order_status in ['Submitted', 'Unknown']:
-                logger.info(f"🔄 Bot {bot_id}: Updating exit order {order_id} price from ${order_info['price']:.2f} to ${current_price:.2f}")
-                # Update limit price to current market price
-                await self._update_exit_order_price(bot_id, order_key, order_info, current_price)
+                if exit_line and exit_line.get('points'):
+                    # Recalculate exit line price from trend line points
+                    exit_line_price_new = self._calculate_trend_line_price(exit_line['points'])
+                    
+                    # Get contract specs to round price to minimum tick
+                    specs = ib_client.get_specs(bot_state['symbol'])
+                    min_tick = specs.get('min_tick', 0.01) if specs else 0.01
+                    
+                    # Round price to minimum tick
+                    def round_to_tick(price: float, tick: float) -> float:
+                        return round(round(price / tick) * tick, 6)
+                    
+                    exit_line_price_rounded = round_to_tick(exit_line_price_new, min_tick)
+                    old_price = order_info.get('price', 0)
+                    
+                    # Only update if price has changed significantly (at least 1 tick)
+                    if abs(exit_line_price_rounded - old_price) >= min_tick:
+                        logger.info(f"🔄 Bot {bot_id}: Updating exit order {order_id} price from ${old_price:.6f} to ${exit_line_price_rounded:.6f} (trend line price)")
+                        await self._update_exit_order_price(bot_id, order_key, order_info, exit_line_price_rounded)
+                    else:
+                        logger.debug(f"🔄 Bot {bot_id}: Exit order {order_id} price unchanged (${exit_line_price_rounded:.6f})")
+                else:
+                    logger.warning(f"⚠️ Bot {bot_id}: Could not find exit line {line_id} for order {order_id}, cannot update price")
             else:
                 logger.debug(f"🔄 Bot {bot_id}: Not updating order {order_id} - should_update_prices={should_update_prices}, status={order_status}")
                 
@@ -744,133 +864,218 @@ class BotService:
         except Exception as e:
             logger.error(f"Error updating exit order price for bot {bot_id}: {e}")
     
-    async def _create_exit_orders_on_position_open(self, bot_id: int, current_price: float):
-        """Create exit limit orders for all exit lines when position is opened"""
+    async def _create_exit_orders_on_position_open(self, bot_id: int, current_price: float, force_resubmit: bool = False):
+        """Create exit limit orders for all exit lines when position is opened or resubmit if missing"""
         try:
             bot_state = self.active_bots[bot_id]
             
             if not bot_state.get('exit_lines'):
-                logger.warning(f"Bot {bot_id}: No exit lines configured")
+                logger.warning(f"Bot {bot_id}: No exit lines configured - cannot create exit orders")
                 return
             
-            logger.info(f"🤖 Bot {bot_id}: Creating exit orders for {len(bot_state['exit_lines'])} exit lines")
+            # Use open_shares if available (for resubmission after partial fills), otherwise use shares_entered
+            total_shares = bot_state.get('open_shares', 0)
+            if total_shares <= 0:
+                total_shares = bot_state.get('shares_entered', 0)
             
-            # Calculate shares per exit line
-            total_shares = bot_state.get('shares_entered', 0)
+            if total_shares <= 0:
+                logger.error(f"Bot {bot_id}: Cannot create exit orders - open_shares={bot_state.get('open_shares', 0)}, shares_entered={bot_state.get('shares_entered', 0)}")
+                return
+            
             total_exit_lines = len(bot_state['exit_lines'])
-            shares_per_exit = total_shares // total_exit_lines
+            if total_exit_lines == 0:
+                logger.warning(f"Bot {bot_id}: No exit lines found - cannot create exit orders")
+                return
             
-            # Create exit orders for each exit line
-            for i, exit_line in enumerate(bot_state['exit_lines']):
-                # Calculate shares for this exit line
-                if i == len(bot_state['exit_lines']) - 1:
-                    # Last exit line gets any remaining shares
-                    shares_to_sell = total_shares - (shares_per_exit * (total_exit_lines - 1))
+            # Check which exit lines already have active orders (unless force_resubmit is True)
+            active_exit_statuses = {
+                'PENDING', 'SUBMITTED', 'PRESUBMITTED', 'PENDINGSUBMIT',
+                'PENDING_SUBMIT', 'WORKING', 'UNKNOWN', 'API_PENDING', 'FILLED'
+            }
+            exit_lines_needing_orders = []
+            
+            for exit_line in bot_state['exit_lines']:
+                exit_order_key = f"exit_order_{exit_line['id']}"
+                existing_order = bot_state.get(exit_order_key)
+                
+                if force_resubmit:
+                    # Force resubmit: cancel existing order if any, then create new one
+                    exit_lines_needing_orders.append(exit_line)
+                elif existing_order and isinstance(existing_order, dict):
+                    status = (existing_order.get('status') or 'PENDING').upper()
+                    if status not in active_exit_statuses or status == 'FILLED':
+                        # Order doesn't exist or is filled, need to create new one
+                        logger.info(f"🔄 Bot {bot_id}: Exit order for line {exit_line['id']} status is {status}, will create new order")
+                        exit_lines_needing_orders.append(exit_line)
+                    else:
+                        logger.info(f"✅ Bot {bot_id}: Exit order for line {exit_line['id']} already exists with status {status}")
                 else:
-                    shares_to_sell = shares_per_exit
-                
-                if shares_to_sell <= 0:
-                    continue
-                
-                # Get current price for this exit line
-                exit_line_price = self._calculate_trend_line_price(exit_line['points'])
-                
-                logger.info(f"🤖 Bot {bot_id}: Creating exit order for line {exit_line['id']} - {shares_to_sell} shares at ${exit_line_price:.2f}")
-                
-                # Place limit sell order
-                contract = await ib_client.qualify_stock(bot_state['symbol'])
-                if not contract:
-                    logger.error(f"Could not qualify {bot_state['symbol']} for exit order")
-                    continue
-                
-                from ib_async import LimitOrder
-                order = LimitOrder("SELL", shares_to_sell, exit_line_price)
-                trade = await ib_client.place_order(contract, order)
-                
-                if trade:
-                    order_id = trade.order.orderId
-                    logger.info(f"✅ Bot {bot_id}: Exit order {order_id} created for line {exit_line['id']}")
+                    # No order exists for this line
+                    logger.info(f"🔄 Bot {bot_id}: No exit order found for line {exit_line['id']}, will create new order")
+                    exit_lines_needing_orders.append(exit_line)
+            
+            if not exit_lines_needing_orders:
+                logger.info(f"✅ Bot {bot_id}: All exit orders already exist and are active, no need to resubmit")
+                return
+            
+            logger.info(f"🤖 Bot {bot_id}: Creating/resubmitting exit orders for {len(exit_lines_needing_orders)} exit lines with {total_shares} total shares")
+            
+            # Calculate shares per exit line (only for lines needing orders)
+            num_lines_needing_orders = len(exit_lines_needing_orders)
+            if num_lines_needing_orders == 0:
+                logger.info(f"✅ Bot {bot_id}: No exit lines need orders")
+                return
+            
+            shares_per_exit = total_shares // num_lines_needing_orders
+            
+            # Create exit orders for each exit line that needs an order
+            orders_created = 0
+            for i, exit_line in enumerate(exit_lines_needing_orders):
+                try:
+                    # Calculate shares for this exit line
+                    if i == num_lines_needing_orders - 1:
+                        # Last exit line gets any remaining shares
+                        shares_to_sell = total_shares - (shares_per_exit * (num_lines_needing_orders - 1))
+                    else:
+                        shares_to_sell = shares_per_exit
+                    
+                    if shares_to_sell <= 0:
+                        logger.warning(f"Bot {bot_id}: Skipping exit line {exit_line['id']} - shares_to_sell is {shares_to_sell}")
+                        continue
+                    
+                    # Get current price for this exit line
+                    exit_line_price = self._calculate_trend_line_price(exit_line['points'])
+                    
+                    # Place limit sell order
+                    from app.utils.ib_client import ib_client
+                    contract = await ib_client.qualify_stock(bot_state['symbol'])
+                    if not contract:
+                        logger.error(f"❌ Bot {bot_id}: Could not qualify {bot_state['symbol']} for exit order on line {exit_line['id']}")
+                        continue
+                    
+                    # Get contract specs to round price to minimum tick
+                    specs = ib_client.get_specs(bot_state['symbol'])
+                    min_tick = specs.get('min_tick', 0.01) if specs else 0.01
+                    
+                    # Round price to minimum tick to avoid Error 110
+                    def round_to_tick(price: float, tick: float) -> float:
+                        return round(round(price / tick) * tick, 6)
+                    
+                    exit_line_price_rounded = round_to_tick(exit_line_price, min_tick)
+                    
+                    logger.info(f"🤖 Bot {bot_id}: Creating exit order for line {exit_line['id']} - {shares_to_sell} shares at ${exit_line_price_rounded:.6f} (original: ${exit_line_price:.6f}, min_tick: {min_tick})")
+                    
+                    from ib_async import LimitOrder
+                    order = LimitOrder("SELL", shares_to_sell, exit_line_price_rounded)
+                    trade = await ib_client.place_order(contract, order)
+                    
+                    if trade:
+                        order_id = trade.order.orderId
+                        logger.info(f"✅ Bot {bot_id}: Exit order {order_id} placed for line {exit_line['id']} - {shares_to_sell} shares at ${exit_line_price_rounded:.6f} (rounded from ${exit_line_price:.6f})")
 
-                    initial_status = await ib_client.await_order_submission(trade, timeout=6.0)
-                    normalized_status = (initial_status or 'PENDING').strip().upper()
+                        initial_status = await ib_client.await_order_submission(trade, timeout=6.0)
+                        normalized_status = (initial_status or 'PENDING').strip().upper()
+                        
+                        logger.info(f"📊 Bot {bot_id}: Exit order {order_id} initial status: {normalized_status}")
 
-                    if normalized_status in {'CANCELLED', 'INACTIVE', 'APICANCELLED', 'REJECTED', 'ERROR'}:
-                        logger.error(
-                            f"❌ Bot {bot_id}: Exit order {order_id} rejected with status {normalized_status}"
-                        )
-                        await self._log_bot_event(bot_id, 'exit_order_rejected', {
-                            'line_id': exit_line['id'],
-                            'line_price': exit_line_price,
-                            'shares_to_sell': shares_to_sell,
+                        if normalized_status in {'CANCELLED', 'INACTIVE', 'APICANCELLED', 'REJECTED', 'ERROR'}:
+                            logger.error(
+                                f"❌ Bot {bot_id}: Exit order {order_id} rejected with status {normalized_status} at price ${exit_line_price_rounded:.6f}"
+                            )
+                            await self._log_bot_event(bot_id, 'exit_order_rejected', {
+                                'line_id': exit_line['id'],
+                                'line_price': exit_line_price_rounded,  # Use rounded price
+                                'shares_to_sell': shares_to_sell,
+                                'order_id': order_id,
+                                'status': normalized_status,
+                            })
+                            continue
+
+                        if normalized_status == 'FILLED':
+                            logger.info(
+                                f"✅ Bot {bot_id}: Exit order {order_id} filled immediately at ${exit_line_price_rounded:.6f}"
+                            )
+                            bot_state['shares_exited'] = bot_state.get('shares_exited', 0) + shares_to_sell
+                            bot_state['open_shares'] = max(0, bot_state.get('open_shares', 0) - shares_to_sell)
+
+                            fully_closed = bot_state['open_shares'] <= 0
+                            if fully_closed:
+                                bot_state['is_bought'] = False
+                                bot_state['crossed_lines'] = set()
+
+                            await self._update_bot_in_db(bot_id, {
+                                'shares_exited': bot_state['shares_exited'],
+                                'open_shares': bot_state['open_shares'],
+                                'is_bought': bot_state.get('is_bought', False),
+                            })
+
+                            # Log exit order filled event (so frontend shows the exit order as filled)
+                            await self._log_bot_event(bot_id, 'spot_exit_limit_order', {
+                                'line_price': exit_line_price_rounded,
+                                'current_price': current_price,
+                                'shares_to_sell': shares_to_sell,
+                                'order_id': order_id,
+                                'order_status': 'FILLED',
+                                'line_id': exit_line['id'],
+                                'strategy': 'uptrend_spot_limit',
+                                'note': 'filled_immediately_on_submit'
+                            })
+
+                            # Log partial exit event (for position tracking)
+                            await self._log_bot_event(bot_id, 'spot_position_partial_exit', {
+                                'line_id': exit_line['id'],
+                                'line_price': exit_line_price_rounded,
+                                'shares_sold': shares_to_sell,
+                                'remaining_shares': bot_state['open_shares'],
+                                'total_exited': bot_state['shares_exited'],
+                                'order_id': order_id,
+                                'strategy': 'uptrend_spot_limit',
+                                'note': 'filled_immediately_on_submit'
+                            })
+
+                            if fully_closed:
+                                logger.info(f"🎉 Bot {bot_id}: All shares sold via immediate fill; completing bot.")
+                                await self._complete_bot(bot_id)
+                            continue
+
+                        # Order is pending - store it and log event
+                        exit_order_key = f"exit_order_{exit_line['id']}"
+                        bot_state[exit_order_key] = {
                             'order_id': order_id,
                             'status': normalized_status,
-                        })
-                        continue
-
-                    if normalized_status == 'FILLED':
-                        logger.info(
-                            f"Bot {bot_id}: Exit order {order_id} filled immediately at ${exit_line_price:.2f}"
-                        )
-                        bot_state['shares_exited'] = bot_state.get('shares_exited', 0) + shares_to_sell
-                        bot_state['open_shares'] = max(0, bot_state.get('open_shares', 0) - shares_to_sell)
-
-                        fully_closed = bot_state['open_shares'] <= 0
-                        if fully_closed:
-                            bot_state['is_bought'] = False
-                            bot_state['crossed_lines'] = set()
-
+                            'price': exit_line_price_rounded,  # Store rounded price (actual order price)
+                            'quantity': shares_to_sell,
+                            'last_update': time.time(),
+                            'line_id': exit_line['id']
+                        }
+                        
                         await self._update_bot_in_db(bot_id, {
-                            'shares_exited': bot_state['shares_exited'],
-                            'open_shares': bot_state['open_shares'],
-                            'is_bought': bot_state.get('is_bought', False),
+                            f'{exit_order_key}_id': order_id,
+                            f'{exit_order_key}_status': normalized_status
                         })
-
-                        await self._log_bot_event(bot_id, 'spot_position_partial_exit', {
-                            'line_id': exit_line['id'],
-                            'line_price': exit_line_price,
-                            'shares_sold': shares_to_sell,
-                            'remaining_shares': bot_state['open_shares'],
-                            'total_exited': bot_state['shares_exited'],
+                        
+                        # Log exit order event with the same event type as _submit_exit_order
+                        await self._log_bot_event(bot_id, 'spot_exit_limit_order', {
+                            'line_price': exit_line_price_rounded,  # Use rounded price (actual order price)
+                            'current_price': current_price,
+                            'shares_to_sell': shares_to_sell,
                             'order_id': order_id,
-                            'strategy': 'uptrend_spot_limit',
-                            'note': 'filled_immediately_on_submit'
+                            'order_status': normalized_status,
+                            'line_id': exit_line['id'],
+                            'strategy': 'uptrend_spot_limit'
                         })
-
-                        if fully_closed:
-                            logger.info(f"🎉 Bot {bot_id}: All shares sold via immediate fill; completing bot.")
-                            await self._complete_bot(bot_id)
-                        continue
-
-                    exit_order_key = f"exit_order_{exit_line['id']}"
-                    bot_state[exit_order_key] = {
-                        'order_id': order_id,
-                        'status': normalized_status,
-                        'price': exit_line_price,
-                        'quantity': shares_to_sell,
-                        'last_update': time.time(),
-                        'line_id': exit_line['id']
-                    }
-                    
-                    await self._update_bot_in_db(bot_id, {
-                        f'{exit_order_key}_id': order_id,
-                        f'{exit_order_key}_status': normalized_status
-                    })
-                    
-                    await self._log_bot_event(bot_id, 'exit_order_created', {
-                        'line_id': exit_line['id'],
-                        'line_price': exit_line_price,
-                        'shares_to_sell': shares_to_sell,
-                        'order_id': order_id,
-                        'initial_status': normalized_status,
-                        'strategy': 'uptrend_spot_limit'
-                    })
-                else:
-                    logger.error(f"❌ Bot {bot_id}: Failed to create exit order for line {exit_line['id']}")
+                        
+                        orders_created += 1
+                        logger.info(f"✅ Bot {bot_id}: Exit order {order_id} logged as event (status: {normalized_status})")
+                    else:
+                        logger.error(f"❌ Bot {bot_id}: Failed to place exit order for line {exit_line['id']} - trade is None")
+                except Exception as e:
+                    logger.error(f"❌ Bot {bot_id}: Error creating exit order for line {exit_line.get('id', 'unknown')}: {e}", exc_info=True)
             
-            logger.info(f"✅ Bot {bot_id}: Exit orders creation completed")
+            logger.info(f"✅ Bot {bot_id}: Exit orders creation completed - {orders_created} orders created out of {total_exit_lines} exit lines")
             
         except Exception as e:
-            logger.error(f"Error creating exit orders for bot {bot_id}: {e}")
+            logger.error(f"❌ Bot {bot_id}: Error creating exit orders: {e}", exc_info=True)
         
     async def _place_stop_loss_order(self, bot_id: int, entry_price: float, quantity: int):
         """Place stop-loss order when buy order is submitted"""
@@ -1243,7 +1448,17 @@ class BotService:
                     'entry_order_status': 'FILLED'
                 })
                 
-                # Log event
+                # Log entry order event
+                await self._log_bot_event(bot_id, 'spot_entry_market_order', {
+                    'line_price': line.get('price', current_price),
+                    'current_price': current_price,
+                    'shares_bought': shares_to_buy,
+                    'order_id': trade.order.orderId,
+                    'order_status': 'FILLED',
+                    'strategy': 'uptrend_spot_market'
+                })
+                
+                # Log position opened event
                 await self._log_bot_event(bot_id, 'spot_position_opened', {
                     'entry_price': current_price,
                     'shares_bought': shares_to_buy,
@@ -1407,27 +1622,40 @@ class BotService:
                 return
                 
             # Place limit sell order for stocks
+            from app.utils.ib_client import ib_client
             contract = await ib_client.qualify_stock(bot_state['symbol'])
             if not contract:
                 logger.error(f"Could not qualify {bot_state['symbol']}")
                 return
+            
+            # Get contract specs to round price to minimum tick
+            specs = ib_client.get_specs(bot_state['symbol'])
+            min_tick = specs.get('min_tick', 0.01) if specs else 0.01
+            
+            # Round price to minimum tick to avoid Error 110
+            def round_to_tick(price: float, tick: float) -> float:
+                return round(round(price / tick) * tick, 6)
+            
+            # Use exit line price if available, otherwise use current_price
+            exit_price = line.get('price', current_price)
+            exit_price_rounded = round_to_tick(exit_price, min_tick)
                 
             # Import LimitOrder
             from ib_async import LimitOrder
             
-            # Place limit sell order at current price
-            order = LimitOrder("SELL", shares_to_sell, current_price)
+            # Place limit sell order at rounded price
+            order = LimitOrder("SELL", shares_to_sell, exit_price_rounded)
             trade = await ib_client.place_order(contract, order)
             
             if trade:
-                logger.info(f"✅ Bot {bot_id}: LIMIT SELL ORDER PLACED - Order ID: {trade.order.orderId}")
+                logger.info(f"✅ Bot {bot_id}: LIMIT SELL ORDER PLACED - Order ID: {trade.order.orderId} at ${exit_price_rounded:.6f} (rounded from ${exit_price:.6f})")
                 
                 # Store exit order information for monitoring
                 exit_order_key = f"exit_order_{line['id']}"
                 bot_state[exit_order_key] = {
                     'order_id': trade.order.orderId,
                     'status': 'PENDING',
-                    'price': current_price,
+                    'price': exit_price_rounded,  # Store rounded price (actual order price)
                     'quantity': shares_to_sell,
                     'last_update': time.time(),
                     'line_id': line['id']
@@ -1441,7 +1669,7 @@ class BotService:
                 
                 # Log event
                 await self._log_bot_event(bot_id, 'spot_exit_limit_order', {
-                    'line_price': line['price'],
+                    'line_price': exit_price_rounded,  # Use rounded price (actual order price)
                     'current_price': current_price,
                     'shares_to_sell': shares_to_sell,
                     'order_id': trade.order.orderId,
@@ -1930,57 +2158,72 @@ class BotService:
                     direction = "ABOVE" if distance > 0 else "BELOW"
                     price_info += f"\n🎯 Nearest Exit: ${nearest_exit:.2f} ({abs(distance):.2f} {direction})"
             
-            # Show hard stop-out information if configured and bot has position
-            hard_stop_out_pct = bot_state.get('bot_hard_stop_out', 0.0)
-            if hard_stop_out_pct > 0 and is_bought:
+            # Show hard stop-out information if bot has position
+            if is_bought:
                 entry_price = bot_state.get('entry_price', 0)
+                hard_stop_out_pct = bot_state.get('bot_hard_stop_out', 0.0)
+                # Also check hard_stop_pct as fallback
+                if hard_stop_out_pct == 0.0:
+                    hard_stop_out_pct = bot_state.get('hard_stop_pct', 0.0)
+                
                 if entry_price > 0:
                     # Convert entry_price to float to avoid Decimal type errors
                     entry_price = float(entry_price)
-                    stop_out_price = entry_price * (1 - hard_stop_out_pct / 100)
-                    distance_to_stop = current_price - stop_out_price
-                    direction_to_stop = "ABOVE" if distance_to_stop > 0 else "BELOW"
-                    price_info += f"\n🛑 Hard Stop-Out: ${stop_out_price:.2f} ({abs(distance_to_stop):.2f} {direction_to_stop}) [{hard_stop_out_pct}%]"
-            
-            # Show soft stop timer information if configured and bot has position
-            soft_stop_pct = bot_state.get('soft_stop_pct', 0.0)
-            soft_stop_minutes = bot_state.get('soft_stop_minutes', 5)
-            soft_stop_timer_active = bot_state.get('soft_stop_timer_active', False)
-            soft_stop_timer_start = bot_state.get('soft_stop_timer_start', None)
-            
-            if soft_stop_pct > 0 and is_bought:
-                entry_price = bot_state.get('entry_price', 0)
-                if entry_price > 0:
-                    # Convert entry_price to float to avoid Decimal type errors
-                    entry_price = float(entry_price)
-                    soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
-                    distance_to_soft_stop = current_price - soft_stop_price
-                    direction_to_soft_stop = "ABOVE" if distance_to_soft_stop > 0 else "BELOW"
-                    
-                    # Check if price is below soft stop
-                    if current_price <= soft_stop_price:
-                        # Price is below soft stop - show timer status
-                        if soft_stop_timer_active and soft_stop_timer_start:
-                            elapsed_seconds = time.time() - soft_stop_timer_start
-                            elapsed_minutes = elapsed_seconds / 60
-                            remaining_seconds = max(0, (soft_stop_minutes * 60) - elapsed_seconds)
-                            remaining_minutes = int(remaining_seconds // 60)
-                            remaining_secs = int(remaining_seconds % 60)
-                            
-                            if remaining_seconds > 0:
-                                price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - ACTIVE: {remaining_minutes}m {remaining_secs}s remaining (expires in {elapsed_minutes:.1f}/{soft_stop_minutes}min)"
-                            else:
-                                price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - EXPIRED (selling...)"
-                        else:
-                            # Timer should start immediately, but if it's not active yet, show starting
-                            price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - STARTING ({soft_stop_minutes}min timer)"
+                    if hard_stop_out_pct > 0:
+                        stop_out_price = entry_price * (1 - hard_stop_out_pct / 100)
+                        distance_to_stop = current_price - stop_out_price
+                        direction_to_stop = "ABOVE" if distance_to_stop > 0 else "BELOW"
+                        price_info += f"\n🛑 Hard Stop-Out: ${stop_out_price:.2f} ({abs(distance_to_stop):.2f} {direction_to_stop}) [{hard_stop_out_pct}%]"
                     else:
-                        # Price is above soft stop - show inactive status
-                        if soft_stop_timer_active:
-                            # Timer was active but price recovered - should be reset by check
-                            price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - RESET (price recovered above stop)"
+                        price_info += f"\n🛑 Hard Stop-Out: Not configured (hard_stop_pct={hard_stop_out_pct}, entry_price=${entry_price:.2f})"
+                else:
+                    price_info += f"\n🛑 Hard Stop-Out: Cannot calculate (entry_price not set)"
+            
+            # Show soft stop timer information if bot has position
+            if is_bought:
+                entry_price = bot_state.get('entry_price', 0)
+                soft_stop_pct = bot_state.get('soft_stop_pct', 0.0)
+                soft_stop_minutes = bot_state.get('soft_stop_minutes', 5)
+                soft_stop_timer_active = bot_state.get('soft_stop_timer_active', False)
+                soft_stop_timer_start = bot_state.get('soft_stop_timer_start', None)
+                
+                if entry_price > 0:
+                    # Convert entry_price to float to avoid Decimal type errors
+                    entry_price = float(entry_price)
+                    
+                    if soft_stop_pct > 0:
+                        soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
+                        distance_to_soft_stop = current_price - soft_stop_price
+                        direction_to_soft_stop = "ABOVE" if distance_to_soft_stop > 0 else "BELOW"
+                        
+                        # Check if price is below soft stop
+                        if current_price <= soft_stop_price:
+                            # Price is below soft stop - show timer status
+                            if soft_stop_timer_active and soft_stop_timer_start:
+                                elapsed_seconds = time.time() - soft_stop_timer_start
+                                elapsed_minutes = elapsed_seconds / 60
+                                remaining_seconds = max(0, (soft_stop_minutes * 60) - elapsed_seconds)
+                                remaining_minutes = int(remaining_seconds // 60)
+                                remaining_secs = int(remaining_seconds % 60)
+                                
+                                if remaining_seconds > 0:
+                                    price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - ACTIVE: {remaining_minutes}m {remaining_secs}s remaining (expires in {elapsed_minutes:.1f}/{soft_stop_minutes}min)"
+                                else:
+                                    price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - EXPIRED (selling...)"
+                            else:
+                                # Timer should start immediately, but if it's not active yet, show starting
+                                price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - STARTING ({soft_stop_minutes}min timer)"
                         else:
-                            price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - INACTIVE (price above stop)"
+                            # Price is above soft stop - show inactive status
+                            if soft_stop_timer_active:
+                                # Timer was active but price recovered - should be reset by check
+                                price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - RESET (price recovered above stop)"
+                            else:
+                                price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - INACTIVE (price above stop)"
+                    else:
+                        price_info += f"\n⏱️ Soft Stop Timer: Not configured (soft_stop_pct={soft_stop_pct}, entry_price=${entry_price:.2f})"
+                else:
+                    price_info += f"\n⏱️ Soft Stop Timer: Cannot calculate (entry_price not set)"
             
             # Show open limit orders
             price_info = await self._log_open_orders(bot_id, bot_state, price_info)
@@ -2193,6 +2436,22 @@ class BotService:
                 bot_state['shares_entered'] = tracker['total_shares_bought']
                 bot_state['open_shares'] = tracker['total_shares_bought']
                 
+                # Determine which line was crossed for logging
+                line_identifier = "1st entry line (lower)" if line['id'] == first_line['id'] else "2nd entry line (higher)"
+                
+                # Log entry order event for this buy order
+                await self._log_bot_event(bot_id, 'spot_entry_market_order', {
+                    'line_price': line.get('price', current_price),
+                    'current_price': current_price,
+                    'shares_bought': shares_to_buy,
+                    'order_id': trade.order.orderId,
+                    'order_status': 'FILLED',
+                    'line_identifier': line_identifier,
+                    'total_shares_bought': tracker['total_shares_bought'],
+                    'strategy': 'uptrend_spot_market',
+                    'multi_buy': True
+                })
+                
                 # If this is the first order, mark as bought
                 if tracker['total_shares_bought'] > 0:
                     bot_state['is_bought'] = True
@@ -2207,9 +2466,20 @@ class BotService:
                     'entry_order_status': 'FILLED'
                 })
                 
-                # If both entry lines are filled, create exit orders
+                # If both entry lines are filled, log position opened event and create exit orders
                 if tracker['first_filled'] and tracker['second_filled']:
                     logger.info(f"✅ Bot {bot_id}: All multi-buy orders placed ({tracker['total_shares_bought']} shares)")
+                    
+                    # Log position opened event (only once when all orders are filled)
+                    await self._log_bot_event(bot_id, 'spot_position_opened', {
+                        'entry_price': bot_state['entry_price'],
+                        'shares_bought': tracker['total_shares_bought'],
+                        'order_id': trade.order.orderId,  # Last order ID
+                        'strategy': 'uptrend_spot_market',
+                        'multi_buy': True,
+                        'total_orders': 2
+                    })
+                    
                     # Create exit limit orders for all exit lines
                     await self._create_exit_orders_on_position_open(bot_id, current_price)
                     # Place stop-loss order using actual shares bought
