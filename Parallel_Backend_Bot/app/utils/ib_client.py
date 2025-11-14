@@ -340,22 +340,110 @@ class IBClient:
         """Modify an existing order's price"""
         await self.ensure_connected()
         try:
-            # Get all open orders
+            # First check the cached open orders
+            cached_trade = self._open_order_cache.get(order_id)
+            if cached_trade:
+                try:
+                    # Get contract and order from cached trade
+                    contract = cached_trade.contract
+                    order = cached_trade.order
+                    if hasattr(order, 'lmtPrice'):
+                        old_price = order.lmtPrice
+                        logger.info(f"🔧 Modifying cached order {order_id} from ${old_price} to ${new_price}")
+                        order.lmtPrice = new_price
+                        trade = self.ib.placeOrder(contract, order)
+                        if trade:
+                            # Await order submission to verify success
+                            status = await self.await_order_submission(trade, timeout=3.0)
+                            normalized_status = (status or 'UNKNOWN').strip().upper()
+                            if normalized_status in {'CANCELLED', 'INACTIVE', 'APICANCELLED', 'REJECTED', 'ERROR'}:
+                                logger.error(f"❌ Order {order_id} modification rejected with status {normalized_status}")
+                                return False
+                            logger.info(f"✅ Modified cached order {order_id} price to ${new_price} (status: {normalized_status})")
+                            return True
+                        else:
+                            logger.warning(f"⚠️ placeOrder returned None for order {order_id}")
+                            return False
+                except Exception as e:
+                    logger.warning(f"⚠️ Error modifying cached order {order_id}: {e}", exc_info=True)
+            
+            # Get all open orders from current client
             open_orders = self.ib.openOrders()
+            logger.info(f"🔧 Searching {len(open_orders)} open orders for order {order_id}")
             
             # Find the order by ID
-            for order in open_orders:
-                if order.order.orderId == order_id:
-                    # Modify the order
-                    order.order.lmtPrice = new_price
-                    self.ib.placeOrder(order.contract, order.order)
-                    logger.info(f"Modified order {order_id} price to {new_price}")
-                    return True
+            for trade in open_orders:
+                try:
+                    if hasattr(trade, 'order') and hasattr(trade.order, 'orderId'):
+                        if trade.order.orderId == order_id:
+                            # Modify the order
+                            if hasattr(trade.order, 'lmtPrice'):
+                                old_price = trade.order.lmtPrice
+                                logger.info(f"🔧 Modifying order {order_id} from ${old_price} to ${new_price}")
+                                trade.order.lmtPrice = new_price
+                                modified_trade = self.ib.placeOrder(trade.contract, trade.order)
+                                if modified_trade:
+                                    # Await order submission to verify success
+                                    status = await self.await_order_submission(modified_trade, timeout=3.0)
+                                    normalized_status = (status or 'UNKNOWN').strip().upper()
+                                    if normalized_status in {'CANCELLED', 'INACTIVE', 'APICANCELLED', 'REJECTED', 'ERROR'}:
+                                        logger.error(f"❌ Order {order_id} modification rejected with status {normalized_status}")
+                                        return False
+                                    logger.info(f"✅ Modified order {order_id} price to ${new_price} (status: {normalized_status})")
+                                    return True
+                                else:
+                                    logger.warning(f"⚠️ placeOrder returned None for order {order_id}")
+                                    return False
+                            else:
+                                logger.warning(f"⚠️ Order {order_id} does not have lmtPrice attribute (might not be a limit order)")
+                                return False
+                except AttributeError:
+                    continue
             
-            logger.warning(f"Order {order_id} not found for modification")
+            # If not found, request all open orders (across all client IDs)
+            logger.info(f"🔧 Order {order_id} not found in current openOrders(); requesting all open orders")
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self.ib.reqAllOpenOrders), timeout=3.0)
+                await asyncio.sleep(0.3)  # Allow events to populate
+            except Exception as e:
+                logger.warning(f"⚠️ Could not reqAllOpenOrders(): {e}")
+            
+            # Try again after reqAllOpenOrders
+            open_orders = self.ib.openOrders()
+            logger.info(f"🔧 After reqAllOpenOrders(), searching {len(open_orders)} open orders for order {order_id}")
+            
+            for trade in open_orders:
+                try:
+                    if hasattr(trade, 'order') and hasattr(trade.order, 'orderId'):
+                        if trade.order.orderId == order_id:
+                            # Modify the order
+                            if hasattr(trade.order, 'lmtPrice'):
+                                old_price = trade.order.lmtPrice
+                                logger.info(f"🔧 Modifying order {order_id} from ${old_price} to ${new_price}")
+                                trade.order.lmtPrice = new_price
+                                modified_trade = self.ib.placeOrder(trade.contract, trade.order)
+                                if modified_trade:
+                                    # Await order submission to verify success
+                                    status = await self.await_order_submission(modified_trade, timeout=3.0)
+                                    normalized_status = (status or 'UNKNOWN').strip().upper()
+                                    if normalized_status in {'CANCELLED', 'INACTIVE', 'APICANCELLED', 'REJECTED', 'ERROR'}:
+                                        logger.error(f"❌ Order {order_id} modification rejected with status {normalized_status}")
+                                        return False
+                                    logger.info(f"✅ Modified order {order_id} price to ${new_price} (status: {normalized_status})")
+                                    return True
+                                else:
+                                    logger.warning(f"⚠️ placeOrder returned None for order {order_id}")
+                                    return False
+                            else:
+                                logger.warning(f"⚠️ Order {order_id} does not have lmtPrice attribute (might not be a limit order)")
+                                return False
+                except AttributeError:
+                    continue
+            
+            logger.warning(f"⚠️ Order {order_id} not found for modification in any open orders")
             return False
         except Exception as e:
-            logger.error(f"Error modifying order {order_id}: {e}")
+            logger.error(f"❌ Error modifying order {order_id}: {e}", exc_info=True)
             return False
     
     async def cancel_order(self, order_id: int) -> bool:

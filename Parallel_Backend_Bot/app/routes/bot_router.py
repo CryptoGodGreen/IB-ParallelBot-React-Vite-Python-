@@ -438,6 +438,15 @@ async def get_bot_trade_history(
             
             # Track order IDs we've already included to avoid duplicates
             included_order_ids = set()
+            # Track exit orders by (order_id, line_id) combination to avoid duplicates for same line
+            included_exit_orders = {}  # {(order_id, line_id): trade_history_entry}
+            # Track if we've found any individual entry order events (to skip summary spot_position_opened)
+            # Pre-scan events to check for individual entry orders (since events are in reverse chronological order)
+            has_individual_entry_orders = any(
+                event.event_type in ("spot_entry_market_order", "spot_entry_limit_order")
+                and (event.event_data or {}).get("order_status", "").upper() == "FILLED"
+                for event in events
+            )
             
             # Transform events into trade history format
             trade_history = []
@@ -496,19 +505,46 @@ async def get_bot_trade_history(
                     continue
                 
                 # Map event types to trade history format
-                if event.event_type == "spot_position_opened":
-                    trade_history.append({
-                        "side": "BUY",
-                        "filled": "Yes",
-                        "target": "Entry",
-                        "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                        "shares_filled": event_data.get("shares_bought", 0),
-                        "price": event_data.get("entry_price", 0),
-                        "order_id": order_id,
-                        "event_type": event.event_type
-                    })
-                    if order_id:
-                        included_order_ids.add(order_id)
+                if event.event_type == "spot_entry_market_order" or event.event_type == "spot_entry_limit_order":
+                    # Individual entry order (for multi-buy mode or single-buy mode)
+                    # Only add if order_status is FILLED
+                    order_status = event_data.get("order_status", "").upper()
+                    if order_status == "FILLED":
+                        has_individual_entry_orders = True  # Mark that we have individual entry orders
+                        order_sequence = event_data.get("order_sequence")
+                        # For multi-buy mode, show "Entry 1" and "Entry 2", otherwise just "Entry"
+                        if order_sequence:
+                            target_label = f"Entry {order_sequence}"
+                        else:
+                            target_label = "Entry"
+                        trade_history.append({
+                            "side": "BUY",
+                            "filled": "Yes",
+                            "target": target_label,
+                            "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                            "shares_filled": event_data.get("shares_bought", 0),
+                            "price": event_data.get("line_price", event_data.get("entry_price", 0)),
+                            "order_id": order_id,
+                            "event_type": event.event_type
+                        })
+                        if order_id:
+                            included_order_ids.add(order_id)
+                elif event.event_type == "spot_position_opened":
+                    # Only add summary spot_position_opened if we don't have individual entry order events
+                    # (spot_position_opened is a summary event, and we prefer individual entry order events)
+                    if not has_individual_entry_orders and (not order_id or order_id not in included_order_ids):
+                        trade_history.append({
+                            "side": "BUY",
+                            "filled": "Yes",
+                            "target": "Entry",
+                            "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                            "shares_filled": event_data.get("shares_bought", 0),
+                            "price": event_data.get("entry_price", 0),
+                            "order_id": order_id,
+                            "event_type": event.event_type
+                        })
+                        if order_id:
+                            included_order_ids.add(order_id)
                 elif event.event_type == "options_position_opened":
                     # Options entry (PUT/CALL)
                     trade_history.append({
@@ -523,19 +559,100 @@ async def get_bot_trade_history(
                     })
                     if order_id:
                         included_order_ids.add(order_id)
+                elif event.event_type == "spot_exit_limit_order":
+                    # Individual exit limit order (can be filled or pending)
+                    order_status = event_data.get("order_status", "").upper()
+                    line_id = event_data.get("line_id", "")
+                    # For multi-exit mode, show line identifier if available
+                    if line_id:
+                        target_label = f"Exit ({line_id})"
+                    else:
+                        target_label = "Exit"
+                    
+                    # Create unique key for this exit order (order_id + line_id to handle same line updates)
+                    exit_key = (order_id, line_id) if order_id else None
+                    
+                    if order_status == "FILLED":
+                        # Exit order filled - always include filled orders
+                        if exit_key not in included_exit_orders:
+                            trade_entry = {
+                                "side": "SELL",
+                                "filled": "Yes",
+                                "target": target_label,
+                                "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                                "shares_filled": event_data.get("shares_to_sell", 0),
+                                "price": event_data.get("line_price", 0),
+                                "order_id": order_id,
+                                "event_type": event.event_type
+                            }
+                            trade_history.append(trade_entry)
+                            included_exit_orders[exit_key] = trade_entry
+                            if order_id:
+                                included_order_ids.add(order_id)
+                    elif order_status == "CANCELLED":
+                        # Exit order cancelled - show as CANCELLED
+                        if exit_key not in included_exit_orders:
+                            trade_entry = {
+                                "side": "SELL",
+                                "filled": "Cancelled",
+                                "target": target_label,
+                                "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                                "shares_filled": event_data.get("shares_to_sell", 0),
+                                "price": event_data.get("line_price", 0),
+                                "order_id": order_id,
+                                "event_type": event.event_type
+                            }
+                            trade_history.append(trade_entry)
+                            included_exit_orders[exit_key] = trade_entry
+                            if order_id:
+                                included_order_ids.add(order_id)
+                        else:
+                            # Update existing order to CANCELLED status
+                            existing_entry = included_exit_orders[exit_key]
+                            existing_entry["filled"] = "Cancelled"
+                            existing_entry["filled_at"] = event.timestamp.isoformat() if event.timestamp else None
+                    else:
+                        # Exit order pending - only keep the most recent pending order for each (order_id, line_id)
+                        if exit_key and exit_key not in included_exit_orders:
+                            trade_entry = {
+                                "side": "SELL",
+                                "filled": "Pending",
+                                "target": target_label,
+                                "filled_at": None,
+                                "shares_filled": event_data.get("shares_to_sell", 0),
+                                "price": event_data.get("line_price", 0),
+                                "order_id": order_id,
+                                "event_type": event.event_type
+                            }
+                            trade_history.append(trade_entry)
+                            included_exit_orders[exit_key] = trade_entry
+                            if order_id:
+                                included_order_ids.add(order_id)
+                        elif exit_key and exit_key in included_exit_orders:
+                            # Update existing pending order with more recent data (events are sorted by timestamp desc)
+                            existing_entry = included_exit_orders[exit_key]
+                            # Only update if current status is Pending (don't overwrite FILLED or CANCELLED)
+                            if existing_entry.get("filled") == "Pending":
+                                # Update with more recent pending order data
+                                existing_entry["shares_filled"] = event_data.get("shares_to_sell", 0)
+                                existing_entry["price"] = event_data.get("line_price", 0)
+                                existing_entry["order_id"] = order_id
                 elif event.event_type == "spot_position_partial_exit":
-                    trade_history.append({
-                        "side": "SELL",
-                        "filled": "Yes",
-                        "target": "Exit",
-                        "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                        "shares_filled": event_data.get("shares_sold", 0),
-                        "price": event_data.get("exit_price", 0),
-                        "order_id": order_id,
-                        "event_type": event.event_type
-                    })
-                    if order_id:
-                        included_order_ids.add(order_id)
+                    # Legacy event type - prefer spot_exit_limit_order if available
+                    # Only add if we don't already have the exit order from spot_exit_limit_order
+                    if order_id not in included_order_ids:
+                        trade_history.append({
+                            "side": "SELL",
+                            "filled": "Yes",
+                            "target": "Exit",
+                            "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                            "shares_filled": event_data.get("shares_sold", 0),
+                            "price": event_data.get("exit_price", 0),
+                            "order_id": order_id,
+                            "event_type": event.event_type
+                        })
+                        if order_id:
+                            included_order_ids.add(order_id)
                 elif event.event_type == "options_position_partial_exit":
                     # Options exit
                     trade_history.append({

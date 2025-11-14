@@ -32,6 +32,8 @@ class BotInstance(Base):
     hard_stop_triggered = Column(Boolean, default=False)
     status = Column(String(20), default='ACTIVE')  # ACTIVE, COMPLETED, STOPPED, ERROR
     multi_buy = Column(String(20), default='disabled')  # Multi-buy mode (default disabled)
+    # filled_exit_lines = Column(String(255), nullable=True)  # Comma-separated list of filled exit line IDs
+    # TODO: Uncomment after running database migration to add filled_exit_lines column
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

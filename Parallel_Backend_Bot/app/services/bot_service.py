@@ -352,7 +352,9 @@ class BotService:
                     'option_contract': None,
                     'option_strike': None,
                     'option_expiry': None,
-                    'option_right': None
+                    'option_right': None,
+                    # Track filled exit lines (loaded from database or initialized as empty set)
+                    'filled_exit_lines': self._load_filled_exit_lines(bot)
                 }
                 
                 # If bot is already bought but has no exit orders, create them
@@ -592,19 +594,29 @@ class BotService:
             
             # Ensure exit orders exist every cycle if bot has a position
             if bot_state.get('is_bought') == True:
+                # Load filled exit lines
+                filled_exit_lines = bot_state.get('filled_exit_lines', set())
+                if isinstance(filled_exit_lines, str):
+                    filled_exit_lines = set(filled_exit_lines.split(',')) if filled_exit_lines else set()
+                elif not isinstance(filled_exit_lines, set):
+                    filled_exit_lines = set()
+                
                 # Check if we have exit lines but no active exit orders
                 exit_lines = bot_state.get('exit_lines', [])
-                if exit_lines and exit_orders_found == 0:
-                    logger.info(f"🔄 Bot {bot_id}: Position is open but no active exit orders found - resubmitting exit orders")
+                # Filter out filled exit lines
+                unfilled_exit_lines = [line for line in exit_lines if line.get('id') not in filled_exit_lines]
+                
+                if unfilled_exit_lines and exit_orders_found == 0:
+                    logger.info(f"🔄 Bot {bot_id}: Position is open but no active exit orders found - resubmitting exit orders (excluding {len(filled_exit_lines)} filled lines)")
                     await self._create_exit_orders_on_position_open(bot_id, current_price, force_resubmit=False)
-                elif exit_lines:
-                    # Check if all exit lines have orders, if not, resubmit missing ones
+                elif unfilled_exit_lines:
+                    # Check if all unfilled exit lines have orders, if not, resubmit missing ones
                     active_exit_statuses_check = {
                         'PENDING', 'SUBMITTED', 'PRESUBMITTED', 'PENDINGSUBMIT',
                         'PENDING_SUBMIT', 'WORKING', 'UNKNOWN', 'API_PENDING'
                     }
                     exit_lines_with_orders = 0
-                    for exit_line in exit_lines:
+                    for exit_line in unfilled_exit_lines:
                         exit_order_key = f"exit_order_{exit_line['id']}"
                         existing_order = bot_state.get(exit_order_key)
                         if existing_order and isinstance(existing_order, dict):
@@ -612,8 +624,8 @@ class BotService:
                             if status in active_exit_statuses_check:
                                 exit_lines_with_orders += 1
                     
-                    if exit_lines_with_orders < len(exit_lines):
-                        logger.info(f"🔄 Bot {bot_id}: Only {exit_lines_with_orders} out of {len(exit_lines)} exit lines have active orders - resubmitting missing exit orders")
+                    if exit_lines_with_orders < len(unfilled_exit_lines):
+                        logger.info(f"🔄 Bot {bot_id}: Only {exit_lines_with_orders} out of {len(unfilled_exit_lines)} unfilled exit lines have active orders (filled: {len(filled_exit_lines)}) - resubmitting missing exit orders")
                         await self._create_exit_orders_on_position_open(bot_id, current_price, force_resubmit=False)
                     
         except Exception as e:
@@ -694,7 +706,9 @@ class BotService:
             
             logger.info(f"🔄 Bot {bot_id}: Getting order status for order {order_id}")
             order_status = await ib_client.get_order_status(order_id)
-            logger.info(f"🔄 Bot {bot_id}: Order {order_id} status: {order_status}")
+            # Normalize order status to uppercase for consistent comparison
+            order_status_normalized = (order_status or 'UNKNOWN').strip().upper()
+            logger.info(f"🔄 Bot {bot_id}: Order {order_id} status: {order_status} (normalized: {order_status_normalized})")
             
             # Recalculate exit line price from trend line for accurate comparison
             line_id = order_info.get('line_id', '')
@@ -721,14 +735,14 @@ class BotService:
                 
                 exit_line_price = round_to_tick(exit_line_price_calculated, min_tick)
             
-            logger.info(f"🎯 Bot {bot_id}: Manual fill check - Current: ${current_price:.2f}, Exit line: ${exit_line_price:.2f}, Order status: {order_status}")
+            logger.info(f"🎯 Bot {bot_id}: Manual fill check - Current: ${current_price:.2f}, Exit line: ${exit_line_price:.2f}, Order status: {order_status_normalized}")
             
             # Check if current price is above exit line (manual fill detection)
-            if current_price >= exit_line_price and order_status in ['Unknown', 'Submitted', 'Pending', 'PreSubmitted']:
-                logger.info(f"🎯 Bot {bot_id}: Current price ${current_price:.2f} >= Exit line ${exit_line_price:.2f}, marking as filled (status was: {order_status})")
-                order_status = 'Filled'
+            if current_price >= exit_line_price and order_status_normalized in ['UNKNOWN', 'SUBMITTED', 'PENDING', 'PRESUBMITTED', 'WORKING']:
+                logger.info(f"🎯 Bot {bot_id}: Current price ${current_price:.2f} >= Exit line ${exit_line_price:.2f}, marking as filled (status was: {order_status_normalized})")
+                order_status_normalized = 'FILLED'
             
-            if order_status == 'Filled':
+            if order_status_normalized == 'FILLED':
                 logger.info(f"✅ Bot {bot_id}: Exit order {order_id} FILLED!")
                 
                 # Update bot state
@@ -739,6 +753,12 @@ class BotService:
                 bot_state['open_shares'] -= shares_sold
                 order_info['status'] = 'FILLED'
                 
+                # Mark this exit line as filled (so we don't create orders for it again)
+                if 'filled_exit_lines' not in bot_state:
+                    bot_state['filled_exit_lines'] = set()
+                bot_state['filled_exit_lines'].add(line_id)
+                logger.info(f"✅ Bot {bot_id}: Marked exit line {line_id} as FILLED. Filled exit lines: {bot_state['filled_exit_lines']}")
+                
                 # Update database
                 logger.info(f"🔄 Bot {bot_id}: Updating database - shares_exited={bot_state['shares_exited']}, open_shares={bot_state['open_shares']}")
                 db_update = {
@@ -747,6 +767,10 @@ class BotService:
                     'open_shares': bot_state['open_shares'],
                     f'{order_key}_status': 'FILLED'  # Update exit order status in database
                 }
+                # Store filled exit lines in database (as comma-separated string)
+                if 'filled_exit_lines' in bot_state:
+                    filled_lines_str = ','.join(sorted(bot_state['filled_exit_lines']))
+                    db_update['filled_exit_lines'] = filled_lines_str
                 await self._update_bot_in_db(bot_id, db_update)
                 
                 # Log exit order filled event (so frontend shows the exit order as filled)
@@ -781,15 +805,24 @@ class BotService:
                     await self._complete_bot(bot_id)
                     return  # Exit early since bot is completed
                 
-            elif should_update_prices and order_status in ['Submitted', 'Unknown', 'Pending', 'PreSubmitted']:
+            # Always check if exit order price needs updating (every cycle, not just every 30 seconds)
+            if order_status_normalized in ['SUBMITTED', 'UNKNOWN', 'PENDING', 'PRESUBMITTED', 'WORKING']:
                 # Recalculate exit line price from trend line (not current market price)
                 line_id = order_info.get('line_id', '')
+                logger.info(f"🔄 Bot {bot_id}: Checking price update for exit order {order_id}, line_id={line_id}")
+                
                 exit_line = None
                 
                 # Find the exit line for this order
-                for exit_line_candidate in bot_state.get('exit_lines', []):
-                    if exit_line_candidate.get('id') == line_id:
+                exit_lines = bot_state.get('exit_lines', [])
+                logger.info(f"🔄 Bot {bot_id}: Searching {len(exit_lines)} exit lines for line_id={line_id}")
+                
+                for exit_line_candidate in exit_lines:
+                    candidate_id = exit_line_candidate.get('id', '')
+                    logger.debug(f"🔄 Bot {bot_id}: Checking exit line candidate: id={candidate_id}")
+                    if candidate_id == line_id:
                         exit_line = exit_line_candidate
+                        logger.info(f"✅ Bot {bot_id}: Found exit line {line_id} for order {order_id}")
                         break
                 
                 if exit_line and exit_line.get('points'):
@@ -805,18 +838,31 @@ class BotService:
                         return round(round(price / tick) * tick, 6)
                     
                     exit_line_price_rounded = round_to_tick(exit_line_price_new, min_tick)
-                    old_price = order_info.get('price', 0)
+                    old_price_raw = order_info.get('price', 0)
+                    old_price = float(old_price_raw)
+                    # Round old price to min_tick for accurate comparison
+                    old_price_rounded = round_to_tick(old_price, min_tick)
                     
-                    # Only update if price has changed significantly (at least 1 tick)
-                    if abs(exit_line_price_rounded - old_price) >= min_tick:
-                        logger.info(f"🔄 Bot {bot_id}: Updating exit order {order_id} price from ${old_price:.6f} to ${exit_line_price_rounded:.6f} (trend line price)")
+                    # Compare rounded prices directly - update if they're different
+                    # Use a small epsilon (1/1000 of min_tick) for floating point comparison
+                    epsilon = min_tick * 0.001  # Very small epsilon (0.00001 for 0.01 tick)
+                    price_diff = abs(exit_line_price_rounded - old_price_rounded)
+                    
+                    logger.info(f"🔄 Bot {bot_id}: Exit order {order_id} price check - Old: ${old_price:.6f} (raw: {old_price_raw}, rounded: ${old_price_rounded:.6f}), New: ${exit_line_price_rounded:.6f}, Diff: ${price_diff:.9f}, MinTick: {min_tick}, Epsilon: {epsilon}")
+                    
+                    # Update if rounded prices are different (using epsilon for floating point safety)
+                    if price_diff > epsilon:
+                        logger.info(f"✅ Bot {bot_id}: Updating exit order {order_id} price from ${old_price:.6f} to ${exit_line_price_rounded:.6f} (trend line price, diff: ${price_diff:.9f} > epsilon: {epsilon})")
                         await self._update_exit_order_price(bot_id, order_key, order_info, exit_line_price_rounded)
                     else:
-                        logger.debug(f"🔄 Bot {bot_id}: Exit order {order_id} price unchanged (${exit_line_price_rounded:.6f})")
+                        logger.info(f"⏭️ Bot {bot_id}: Exit order {order_id} price unchanged (${exit_line_price_rounded:.6f} vs ${old_price_rounded:.6f}, diff: ${price_diff:.9f} <= epsilon: {epsilon})")
                 else:
-                    logger.warning(f"⚠️ Bot {bot_id}: Could not find exit line {line_id} for order {order_id}, cannot update price")
+                    if not exit_line:
+                        logger.warning(f"⚠️ Bot {bot_id}: Could not find exit line with id={line_id} for order {order_id}. Available exit line IDs: {[e.get('id') for e in exit_lines]}")
+                    else:
+                        logger.warning(f"⚠️ Bot {bot_id}: Exit line {line_id} found but has no points data for order {order_id}")
             else:
-                logger.debug(f"🔄 Bot {bot_id}: Not updating order {order_id} - should_update_prices={should_update_prices}, status={order_status}")
+                logger.debug(f"🔄 Bot {bot_id}: Exit order {order_id} status {order_status_normalized} is not active, skipping price update")
                 
         except Exception as e:
             logger.error(f"Error checking exit order status for bot {bot_id}: {e}")
@@ -873,12 +919,18 @@ class BotService:
                 logger.warning(f"Bot {bot_id}: No exit lines configured - cannot create exit orders")
                 return
             
-            # Use open_shares if available (for resubmission after partial fills), otherwise use shares_entered
-            total_shares = bot_state.get('open_shares', 0)
-            if total_shares <= 0:
-                total_shares = bot_state.get('shares_entered', 0)
+            # Use open_shares for total shares to allocate (remaining shares after fills)
+            total_shares_to_allocate = bot_state.get('open_shares', 0)
+            if total_shares_to_allocate <= 0:
+                total_shares_to_allocate = bot_state.get('shares_entered', 0)
             
-            if total_shares <= 0:
+            # Use shares_entered (original total) for calculating per-line allocation
+            # This ensures consistent allocation (50/50) regardless of partial fills
+            original_total_shares = bot_state.get('shares_entered', 0)
+            if original_total_shares <= 0:
+                original_total_shares = total_shares_to_allocate
+            
+            if total_shares_to_allocate <= 0:
                 logger.error(f"Bot {bot_id}: Cannot create exit orders - open_shares={bot_state.get('open_shares', 0)}, shares_entered={bot_state.get('shares_entered', 0)}")
                 return
             
@@ -887,57 +939,186 @@ class BotService:
                 logger.warning(f"Bot {bot_id}: No exit lines found - cannot create exit orders")
                 return
             
-            # Check which exit lines already have active orders (unless force_resubmit is True)
+            # Load filled exit lines from bot_state (set of line IDs that have been filled)
+            filled_exit_lines = bot_state.get('filled_exit_lines', set())
+            if isinstance(filled_exit_lines, str):
+                # If loaded from database as comma-separated string, convert to set
+                filled_exit_lines = set(filled_exit_lines.split(',')) if filled_exit_lines else set()
+            elif not isinstance(filled_exit_lines, set):
+                filled_exit_lines = set()
+            
+            # Filter out filled exit lines - only work with unfilled lines
+            unfilled_exit_lines = [line for line in bot_state['exit_lines'] if line.get('id') not in filled_exit_lines]
+            unfilled_count = len(unfilled_exit_lines)
+            
+            if unfilled_count == 0:
+                logger.info(f"✅ Bot {bot_id}: All exit lines have been filled ({len(filled_exit_lines)}/{total_exit_lines}), no need to create orders")
+                return
+            
+            logger.info(f"🔄 Bot {bot_id}: {unfilled_count} unfilled exit lines out of {total_exit_lines} total. Filled lines: {filled_exit_lines}")
+            logger.info(f"🔄 Bot {bot_id}: Original total shares: {original_total_shares}, Shares to allocate: {total_shares_to_allocate}")
+            
+            # Calculate target shares per exit line based on ORIGINAL total shares and ORIGINAL exit lines count
+            # This ensures each exit line gets a fixed share (e.g., 50/50) regardless of which lines are filled
+            shares_per_exit = original_total_shares // total_exit_lines if total_exit_lines > 0 else 0
+            logger.info(f"🔄 Bot {bot_id}: Shares per exit line (based on original {total_exit_lines} lines and {original_total_shares} shares): {shares_per_exit}")
+            
+            # Check which unfilled exit lines already have active orders and if they need updating
             active_exit_statuses = {
                 'PENDING', 'SUBMITTED', 'PRESUBMITTED', 'PENDINGSUBMIT',
-                'PENDING_SUBMIT', 'WORKING', 'UNKNOWN', 'API_PENDING', 'FILLED'
+                'PENDING_SUBMIT', 'WORKING', 'UNKNOWN', 'API_PENDING'
             }
             exit_lines_needing_orders = []
+            orders_to_cancel = []
             
-            for exit_line in bot_state['exit_lines']:
+            for i, exit_line in enumerate(unfilled_exit_lines):
                 exit_order_key = f"exit_order_{exit_line['id']}"
                 existing_order = bot_state.get(exit_order_key)
                 
+                # Calculate target shares for this exit line (always use shares_per_exit based on original count)
+                # Check if this is the last original exit line (not just last unfilled) to handle remainder
+                exit_line_index_in_original = next((j for j, line in enumerate(bot_state['exit_lines']) if line['id'] == exit_line['id']), -1)
+                is_last_original_exit_line = exit_line_index_in_original == total_exit_lines - 1
+                
+                if is_last_original_exit_line:
+                    # Last original exit line gets any remainder
+                    total_allocated = shares_per_exit * (total_exit_lines - 1)
+                    remainder = original_total_shares - total_allocated
+                    target_shares = remainder if remainder > 0 else shares_per_exit
+                else:
+                    # All other exit lines get equal shares
+                    target_shares = shares_per_exit
+                
                 if force_resubmit:
                     # Force resubmit: cancel existing order if any, then create new one
+                    if existing_order and isinstance(existing_order, dict):
+                        orders_to_cancel.append((exit_order_key, existing_order))
                     exit_lines_needing_orders.append(exit_line)
                 elif existing_order and isinstance(existing_order, dict):
                     status = (existing_order.get('status') or 'PENDING').upper()
+                    existing_shares = int(existing_order.get('quantity', 0)) if existing_order.get('quantity') is not None else 0
+                    target_shares_int = int(target_shares)
+                    
                     if status not in active_exit_statuses or status == 'FILLED':
-                        # Order doesn't exist or is filled, need to create new one
+                        # Order doesn't exist, is filled, or is inactive - need new one
                         logger.info(f"🔄 Bot {bot_id}: Exit order for line {exit_line['id']} status is {status}, will create new order")
                         exit_lines_needing_orders.append(exit_line)
+                    elif existing_shares != target_shares_int:
+                        # Order exists but shares have changed - cancel and recreate
+                        logger.info(f"🔄 Bot {bot_id}: Exit order for line {exit_line['id']} shares changed from {existing_shares} to {target_shares_int}, will update")
+                        orders_to_cancel.append((exit_order_key, existing_order))
+                        exit_lines_needing_orders.append(exit_line)
                     else:
-                        logger.info(f"✅ Bot {bot_id}: Exit order for line {exit_line['id']} already exists with status {status}")
+                        logger.info(f"✅ Bot {bot_id}: Exit order for line {exit_line['id']} already exists with correct shares ({target_shares_int}) and status {status}")
                 else:
                     # No order exists for this line
                     logger.info(f"🔄 Bot {bot_id}: No exit order found for line {exit_line['id']}, will create new order")
                     exit_lines_needing_orders.append(exit_line)
             
+            # Cancel existing orders that need to be updated
+            # Also check all exit lines for any existing orders when force_resubmit is True
+            if force_resubmit:
+                # When force_resubmit is True, cancel ALL existing exit orders for unfilled lines
+                logger.info(f"🔄 Bot {bot_id}: Force resubmit mode - checking all unfilled exit lines for existing orders to cancel")
+                for exit_line in unfilled_exit_lines:
+                    exit_order_key = f"exit_order_{exit_line['id']}"
+                    existing_order = bot_state.get(exit_order_key)
+                    if existing_order and isinstance(existing_order, dict):
+                        order_id = existing_order.get('order_id')
+                        if order_id:
+                            # Check if already in orders_to_cancel
+                            already_in_cancel_list = any(
+                                cancel_key == exit_order_key
+                                for cancel_key, _ in orders_to_cancel
+                            )
+                            if not already_in_cancel_list:
+                                logger.info(f"🔄 Bot {bot_id}: Force resubmit - will cancel existing exit order {order_id} for {exit_order_key}")
+                                orders_to_cancel.append((exit_order_key, existing_order))
+            
+            if orders_to_cancel:
+                from app.utils.ib_client import ib_client
+                logger.info(f"🔄 Bot {bot_id}: Cancelling {len(orders_to_cancel)} exit orders that need updating")
+                cancelled_keys = []
+                for exit_order_key, order_info in orders_to_cancel:
+                    try:
+                        order_id = order_info.get('order_id')
+                        line_id = order_info.get('line_id', '')
+                        cancelled_quantity = order_info.get('quantity', 0)
+                        cancelled_price = order_info.get('price', 0)
+                        
+                        if order_id:
+                            logger.info(f"🔄 Bot {bot_id}: Cancelling exit order {order_id} for {exit_order_key} (current shares: {cancelled_quantity})")
+                            success = await ib_client.cancel_order(order_id)
+                            if success:
+                                logger.info(f"✅ Bot {bot_id}: Successfully cancelled exit order {order_id}")
+                                
+                                # Log cancellation event so it shows as CANCELLED in trade history
+                                await self._log_bot_event(bot_id, 'spot_exit_limit_order', {
+                                    'line_price': cancelled_price,
+                                    'current_price': current_price,
+                                    'shares_to_sell': cancelled_quantity,
+                                    'order_id': order_id,
+                                    'order_status': 'CANCELLED',
+                                    'line_id': line_id,
+                                    'strategy': 'uptrend_spot_limit',
+                                    'note': 'cancelled_for_update'
+                                })
+                                
+                                cancelled_keys.append(exit_order_key)
+                            else:
+                                logger.warning(f"⚠️ Bot {bot_id}: Failed to cancel exit order {order_id}, but will continue to create new order")
+                                # Still remove from bot_state even if cancellation failed, so we create new order
+                                cancelled_keys.append(exit_order_key)
+                    except Exception as e:
+                        logger.error(f"❌ Bot {bot_id}: Error cancelling exit order {exit_order_key}: {e}")
+                        # Still remove from bot_state on error, so we create new order
+                        cancelled_keys.append(exit_order_key)
+                
+                # Remove cancelled orders from bot_state after all cancellations
+                for exit_order_key in cancelled_keys:
+                    if exit_order_key in bot_state:
+                        del bot_state[exit_order_key]
+                        logger.info(f"🗑️ Bot {bot_id}: Removed {exit_order_key} from bot_state after cancellation")
+                
+                # Small delay to ensure cancellation is processed
+                await asyncio.sleep(0.5)
+            
             if not exit_lines_needing_orders:
-                logger.info(f"✅ Bot {bot_id}: All exit orders already exist and are active, no need to resubmit")
+                logger.info(f"✅ Bot {bot_id}: All exit orders already exist with correct shares, no need to resubmit")
                 return
             
-            logger.info(f"🤖 Bot {bot_id}: Creating/resubmitting exit orders for {len(exit_lines_needing_orders)} exit lines with {total_shares} total shares")
+            logger.info(f"🤖 Bot {bot_id}: Creating/resubmitting exit orders for {len(exit_lines_needing_orders)} exit lines with {total_shares_to_allocate} shares to allocate (original: {original_total_shares})")
             
-            # Calculate shares per exit line (only for lines needing orders)
+            # Use the same shares_per_exit calculation based on original exit lines count and original total shares
+            # This ensures consistent share allocation (50/50) regardless of which lines are filled
             num_lines_needing_orders = len(exit_lines_needing_orders)
             if num_lines_needing_orders == 0:
                 logger.info(f"✅ Bot {bot_id}: No exit lines need orders")
                 return
             
-            shares_per_exit = total_shares // num_lines_needing_orders
+            # Calculate shares per exit line based on ORIGINAL total shares and ORIGINAL exit lines count
+            # Each exit line should get original_total_shares // total_exit_lines (e.g., 100 // 2 = 50)
+            shares_per_exit_line = original_total_shares // total_exit_lines if total_exit_lines > 0 else 0
+            logger.info(f"🤖 Bot {bot_id}: Shares per exit line (based on original {total_exit_lines} lines and {original_total_shares} shares): {shares_per_exit_line}")
             
             # Create exit orders for each exit line that needs an order
             orders_created = 0
             for i, exit_line in enumerate(exit_lines_needing_orders):
                 try:
-                    # Calculate shares for this exit line
-                    if i == num_lines_needing_orders - 1:
-                        # Last exit line gets any remaining shares
-                        shares_to_sell = total_shares - (shares_per_exit * (num_lines_needing_orders - 1))
+                    # Each exit line gets equal shares based on original count (e.g., 50/50)
+                    # Only the last original exit line (not the last unfilled) gets any remainder
+                    # Check if this is the last original exit line by comparing line IDs
+                    exit_line_index_in_original = next((j for j, line in enumerate(bot_state['exit_lines']) if line['id'] == exit_line['id']), -1)
+                    is_last_original_exit_line = exit_line_index_in_original == total_exit_lines - 1
+                    
+                    if is_last_original_exit_line:
+                        # Last original exit line gets any remainder
+                        total_allocated = shares_per_exit_line * (total_exit_lines - 1)
+                        remainder = original_total_shares - total_allocated
+                        shares_to_sell = remainder if remainder > 0 else shares_per_exit_line
+                        logger.info(f"🤖 Bot {bot_id}: Last original exit line {exit_line['id']} gets remainder: {shares_to_sell} shares (from original {original_total_shares} shares)")
                     else:
-                        shares_to_sell = shares_per_exit
+                        shares_to_sell = shares_per_exit_line
                     
                     if shares_to_sell <= 0:
                         logger.warning(f"Bot {bot_id}: Skipping exit line {exit_line['id']} - shares_to_sell is {shares_to_sell}")
@@ -998,16 +1179,28 @@ class BotService:
                             bot_state['shares_exited'] = bot_state.get('shares_exited', 0) + shares_to_sell
                             bot_state['open_shares'] = max(0, bot_state.get('open_shares', 0) - shares_to_sell)
 
+                            # Mark this exit line as filled (so we don't create orders for it again)
+                            if 'filled_exit_lines' not in bot_state:
+                                bot_state['filled_exit_lines'] = set()
+                            bot_state['filled_exit_lines'].add(exit_line['id'])
+                            logger.info(f"✅ Bot {bot_id}: Marked exit line {exit_line['id']} as FILLED (immediate fill). Filled exit lines: {bot_state['filled_exit_lines']}")
+
                             fully_closed = bot_state['open_shares'] <= 0
                             if fully_closed:
                                 bot_state['is_bought'] = False
                                 bot_state['crossed_lines'] = set()
 
-                            await self._update_bot_in_db(bot_id, {
+                            db_update = {
                                 'shares_exited': bot_state['shares_exited'],
                                 'open_shares': bot_state['open_shares'],
                                 'is_bought': bot_state.get('is_bought', False),
-                            })
+                            }
+                            # Store filled exit lines in database
+                            if 'filled_exit_lines' in bot_state:
+                                filled_lines_str = ','.join(sorted(bot_state['filled_exit_lines']))
+                                db_update['filled_exit_lines'] = filled_lines_str
+                            
+                            await self._update_bot_in_db(bot_id, db_update)
 
                             # Log exit order filled event (so frontend shows the exit order as filled)
                             await self._log_bot_event(bot_id, 'spot_exit_limit_order', {
@@ -1082,13 +1275,27 @@ class BotService:
         try:
             bot_state = self.active_bots[bot_id]
             
+            # Check if there's an existing stop loss order - cancel it before placing a new one
+            existing_stop_loss_order_id = bot_state.get('stop_loss_order_id')
+            if existing_stop_loss_order_id:
+                try:
+                    logger.info(f"🔄 Bot {bot_id}: Cancelling existing stop loss order {existing_stop_loss_order_id} before placing new one")
+                    from app.utils.ib_client import ib_client
+                    success = await ib_client.cancel_order(int(existing_stop_loss_order_id) if isinstance(existing_stop_loss_order_id, str) else existing_stop_loss_order_id)
+                    if success:
+                        logger.info(f"✅ Bot {bot_id}: Successfully cancelled existing stop loss order")
+                    else:
+                        logger.warning(f"⚠️ Bot {bot_id}: Failed to cancel existing stop loss order, but continuing with new order")
+                except Exception as e:
+                    logger.warning(f"⚠️ Bot {bot_id}: Error cancelling existing stop loss order: {e}, but continuing with new order")
+            
             # Get hard stop-out percentage
             hard_stop_out_pct = float(bot_state.get('bot_hard_stop_out', 5.0))
             
             # Calculate stop-loss price (entry price - stop-out percentage)
             stop_loss_price = entry_price * (1 - hard_stop_out_pct / 100)
             
-            logger.info(f"🛡️ Bot {bot_id}: Placing stop-loss order at ${stop_loss_price:.2f} ({hard_stop_out_pct}% below entry)")
+            logger.info(f"🛡️ Bot {bot_id}: Placing stop-loss order at ${stop_loss_price:.2f} ({hard_stop_out_pct}% below entry) for {quantity} shares")
             
             # Get contract
             contract = await ib_client.qualify_stock(bot_state['symbol'])
@@ -1106,15 +1313,16 @@ class BotService:
             if trade:
                 logger.info(f"✅ Bot {bot_id}: STOP-LOSS ORDER PLACED - Order ID: {trade.order.orderId}")
                 
-                # Store stop-loss order information
-                bot_state['stop_loss_order_id'] = trade.order.orderId
+                # Store stop-loss order information (convert order ID to string for database)
+                stop_loss_order_id_str = str(trade.order.orderId)
+                bot_state['stop_loss_order_id'] = stop_loss_order_id_str
                 bot_state['stop_loss_price'] = stop_loss_price
                 bot_state['stop_loss_quantity'] = quantity
                 bot_state['stop_loss_percentage'] = hard_stop_out_pct
                 
                 # Update database
                 await self._update_bot_in_db(bot_id, {
-                    'stop_loss_order_id': trade.order.orderId,
+                    'stop_loss_order_id': stop_loss_order_id_str,
                     'stop_loss_price': stop_loss_price
                 })
                 
@@ -1736,6 +1944,22 @@ class BotService:
         except Exception as e:
             logger.error(f"Error executing options exit trade for bot {bot_id}: {e}")
             
+    def _load_filled_exit_lines(self, bot):
+        """Load filled exit lines from bot instance (from database or return empty set)"""
+        try:
+            # Try to get filled_exit_lines from bot instance
+            filled_lines = getattr(bot, 'filled_exit_lines', None)
+            if filled_lines:
+                if isinstance(filled_lines, str):
+                    # If stored as comma-separated string, convert to set
+                    return set(filled_lines.split(',')) if filled_lines else set()
+                elif isinstance(filled_lines, (list, set)):
+                    return set(filled_lines)
+            return set()
+        except Exception as e:
+            logger.debug(f"Could not load filled_exit_lines from bot: {e}")
+            return set()
+    
     async def _update_bot_in_db(self, bot_id: int, updates: dict):
         """Update bot in database"""
         async with AsyncSessionLocal() as session:
@@ -1746,12 +1970,52 @@ class BotService:
                     'total_position', 'shares_entered', 'shares_exited', 'open_shares',
                     'position_size', 'max_position', 'entry_order_id', 'entry_order_status',
                     'stop_loss_order_id', 'stop_loss_price', 'hard_stop_triggered', 'status'
+                    # 'filled_exit_lines'  # TODO: Uncomment after running database migration to add filled_exit_lines column
                 }
                 
-                # Only include valid database columns
-                filtered_updates = {k: v for k, v in updates.items() if k in valid_columns}
+                # Filter out invalid columns and log them
+                filtered_updates = {}
+                filtered_out = []
+                for k, v in updates.items():
+                    if k in valid_columns:
+                        filtered_updates[k] = v
+                    else:
+                        filtered_out.append(k)
+                
+                if filtered_out:
+                    logger.debug(f"🔄 Bot {bot_id}: Filtered out non-database columns: {filtered_out}")
+                
+                if not filtered_updates:
+                    logger.debug(f"🔄 Bot {bot_id}: No valid columns to update after filtering")
+                    return
                 
                 logger.info(f"🔄 Bot {bot_id}: Updating database with: {filtered_updates}")
+                
+                # Convert DECIMAL fields properly
+                decimal_fields = {'current_price', 'entry_price', 'stop_loss_price'}
+                for field in decimal_fields:
+                    if field in filtered_updates and filtered_updates[field] is not None:
+                        # Convert to float first, then Decimal will be handled by SQLAlchemy
+                        filtered_updates[field] = float(filtered_updates[field])
+                
+                # Convert String fields (order IDs) to strings
+                string_fields = {'entry_order_id', 'entry_order_status', 'stop_loss_order_id', 'status'}
+                # 'filled_exit_lines'  # TODO: Add after running database migration
+                for field in string_fields:
+                    if field in filtered_updates and filtered_updates[field] is not None:
+                        # Convert to string if it's not already
+                        if not isinstance(filtered_updates[field], str):
+                            filtered_updates[field] = str(filtered_updates[field])
+                
+                # Check if filled_exit_lines column exists in database (it might not if migration hasn't been run)
+                # Try to query the column directly - if it doesn't exist, SQLAlchemy will raise an error
+                # For now, we'll proactively remove it and handle the error in exception handler if it still occurs
+                # Note: We can't reliably check if a column exists without a separate query, so we'll catch the error instead
+                
+                if not filtered_updates:
+                    logger.debug(f"🔄 Bot {bot_id}: No valid columns to update after filtering")
+                    return
+                
                 await session.execute(
                     update(BotInstance)
                     .where(BotInstance.id == bot_id)
@@ -1760,7 +2024,51 @@ class BotService:
                 await session.commit()
                 logger.info(f"✅ Bot {bot_id}: Database update committed successfully")
             except Exception as e:
-                logger.error(f"Error updating bot {bot_id} in database: {e}")
+                error_msg = str(e)
+                # Check for "Unconsumed column" error and handle gracefully
+                if 'Unconsumed column' in error_msg and 'filled_exit_lines' in error_msg:
+                    logger.warning(f"⚠️ Bot {bot_id}: filled_exit_lines column doesn't exist in database yet, retrying update without it")
+                    try:
+                        # Reconstruct filtered_updates from original updates, excluding filled_exit_lines
+                        valid_columns = {
+                            'is_active', 'is_running', 'is_bought', 'current_price', 'entry_price',
+                            'total_position', 'shares_entered', 'shares_exited', 'open_shares',
+                            'position_size', 'max_position', 'entry_order_id', 'entry_order_status',
+                            'stop_loss_order_id', 'stop_loss_price', 'hard_stop_triggered', 'status'
+                        }
+                        
+                        # Filter updates again, excluding filled_exit_lines
+                        retry_updates = {}
+                        for k, v in updates.items():
+                            if k in valid_columns:  # Exclude filled_exit_lines
+                                retry_updates[k] = v
+                        
+                        # Convert types for retry
+                        decimal_fields = {'current_price', 'entry_price', 'stop_loss_price'}
+                        for field in decimal_fields:
+                            if field in retry_updates and retry_updates[field] is not None:
+                                retry_updates[field] = float(retry_updates[field])
+                        
+                        string_fields = {'entry_order_id', 'entry_order_status', 'stop_loss_order_id', 'status'}
+                        for field in string_fields:
+                            if field in retry_updates and retry_updates[field] is not None:
+                                if not isinstance(retry_updates[field], str):
+                                    retry_updates[field] = str(retry_updates[field])
+                        
+                        if retry_updates:  # Only retry if there are still updates to make
+                            await session.execute(
+                                update(BotInstance)
+                                .where(BotInstance.id == bot_id)
+                                .values(**retry_updates, updated_at=datetime.now())
+                            )
+                            await session.commit()
+                            logger.info(f"✅ Bot {bot_id}: Database update committed successfully (without filled_exit_lines)")
+                            return
+                    except Exception as retry_error:
+                        logger.error(f"❌ Error retrying update without filled_exit_lines: {retry_error}", exc_info=True)
+                logger.error(f"❌ Error updating bot {bot_id} in database: {e}", exc_info=True)
+                logger.error(f"❌ Attempted updates: {updates}")
+                # Don't raise - just log the error so the bot continues running
                 
     async def _log_bot_event(self, bot_id: int, event_type: str, event_data: dict):
         """Log bot event to database"""
@@ -2325,14 +2633,23 @@ class BotService:
             if len(points) < 2:
                 return 0.0
             
-            # Get current time (in seconds since epoch, matching TradingView format)
-            current_time = int(time.time())
-            
             # Extract time and price from points
             times = [point['time'] for point in points]
             prices = [point['price'] for point in points]
             
             logger.info(f"Trend line points: times={times}, prices={prices}")
+            
+            # Determine time format: TradingView uses milliseconds, but frontend might convert to seconds
+            # Check if times are in milliseconds (typically > 1e12) or seconds (typically < 1e10)
+            # If times are in seconds, convert to milliseconds to match TradingView's internal format
+            if times and times[0] < 1e10:  # Times are in seconds (e.g., 1763135400)
+                # Convert to milliseconds to match TradingView format
+                times = [t * 1000 for t in times]
+                current_time = int(time.time() * 1000)  # Current time in milliseconds
+                logger.info(f"Converted times from seconds to milliseconds: {times}, current_time={current_time}")
+            else:
+                # Times are already in milliseconds
+                current_time = int(time.time() * 1000)  # Current time in milliseconds
             
             # Calculate slope and intercept using linear regression
             # y = mx + b where y=price, x=time, m=slope, b=intercept
@@ -2439,6 +2756,19 @@ class BotService:
                 # Determine which line was crossed for logging
                 line_identifier = "1st entry line (lower)" if line['id'] == first_line['id'] else "2nd entry line (higher)"
                 
+                # Store entry order ID for this specific order first
+                order_key = 'entry_order_id_1' if line['id'] == first_line['id'] else 'entry_order_id_2'
+                bot_state[order_key] = trade.order.orderId
+                
+                # Collect all entry order IDs (including the one we just stored)
+                entry_order_1 = bot_state.get('entry_order_id_1')
+                entry_order_2 = bot_state.get('entry_order_id_2')
+                all_order_ids_list = []
+                if entry_order_1:
+                    all_order_ids_list.append(str(entry_order_1))
+                if entry_order_2:
+                    all_order_ids_list.append(str(entry_order_2))
+                
                 # Log entry order event for this buy order
                 await self._log_bot_event(bot_id, 'spot_entry_market_order', {
                     'line_price': line.get('price', current_price),
@@ -2448,6 +2778,8 @@ class BotService:
                     'order_status': 'FILLED',
                     'line_identifier': line_identifier,
                     'total_shares_bought': tracker['total_shares_bought'],
+                    'all_entry_order_ids': ','.join(all_order_ids_list),  # Include all order IDs
+                    'order_sequence': '1' if line['id'] == first_line['id'] else '2',  # Show which order (1st or 2nd)
                     'strategy': 'uptrend_spot_market',
                     'multi_buy': True
                 })
@@ -2458,15 +2790,42 @@ class BotService:
                     if bot_state['entry_price'] == 0:
                         bot_state['entry_price'] = current_price
                 
-                # Update database
-                await self._update_bot_in_db(bot_id, {
+                # Store entry_order_id (use the latest order ID for backward compatibility)
+                bot_state['entry_order_id'] = trade.order.orderId
+                
+                # Update database with entry order ID
+                # Store the latest order ID in entry_order_id for backward compatibility
+                # Individual order IDs are tracked in bot_state for internal use
+                
+                # Collect all entry order IDs for multi-buy mode
+                all_entry_order_ids = []
+                if bot_state.get('entry_order_id_1'):
+                    all_entry_order_ids.append(str(bot_state['entry_order_id_1']))
+                if bot_state.get('entry_order_id_2'):
+                    all_entry_order_ids.append(str(bot_state['entry_order_id_2']))
+                
+                # Store as comma-separated list if multiple orders, or single ID if one order
+                entry_order_ids_str = ','.join(all_entry_order_ids) if all_entry_order_ids else str(trade.order.orderId)
+                
+                db_update = {
                     'is_bought': bot_state['is_bought'],
                     'shares_entered': bot_state['shares_entered'],
                     'open_shares': bot_state['open_shares'],
-                    'entry_order_status': 'FILLED'
-                })
+                    'entry_order_status': 'FILLED',
+                    'entry_order_id': entry_order_ids_str  # Store all order IDs (comma-separated)
+                }
                 
-                # If both entry lines are filled, log position opened event and create exit orders
+                await self._update_bot_in_db(bot_id, db_update)
+                
+                logger.info(f"✅ Bot {bot_id}: Entry order {trade.order.orderId} stored in database - {shares_to_buy} shares at ${current_price:.2f} (Total: {tracker['total_shares_bought']}, All Order IDs: {entry_order_ids_str})")
+                
+                # After first entry order is filled, create exit orders with partial shares
+                if tracker['first_filled'] and not tracker['second_filled']:
+                    logger.info(f"✅ Bot {bot_id}: First entry order filled ({shares_to_buy} shares), creating exit orders with partial shares")
+                    # Create exit orders with current shares (will be 25/25 if total is 100)
+                    await self._create_exit_orders_on_position_open(bot_id, current_price)
+                
+                # If both entry lines are filled, log position opened event and update exit orders
                 if tracker['first_filled'] and tracker['second_filled']:
                     logger.info(f"✅ Bot {bot_id}: All multi-buy orders placed ({tracker['total_shares_bought']} shares)")
                     
@@ -2480,8 +2839,11 @@ class BotService:
                         'total_orders': 2
                     })
                     
-                    # Create exit limit orders for all exit lines
-                    await self._create_exit_orders_on_position_open(bot_id, current_price)
+                    # Update exit orders to reflect full position (50/50 instead of 25/25)
+                    logger.info(f"✅ Bot {bot_id}: Updating exit orders from partial to full position ({tracker['total_shares_bought']} shares)")
+                    # Force resubmit to ensure old orders (25/25) are cancelled and new ones (50/50) are created
+                    await self._create_exit_orders_on_position_open(bot_id, current_price, force_resubmit=True)
+                    
                     # Place stop-loss order using actual shares bought
                     await self._place_stop_loss_order(bot_id, bot_state['entry_price'], tracker['total_shares_bought'])
             else:
