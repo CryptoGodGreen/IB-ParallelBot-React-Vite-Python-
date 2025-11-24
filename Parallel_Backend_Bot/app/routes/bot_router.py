@@ -398,6 +398,175 @@ async def cancel_all_orders(
         logger.error(f"Error cancelling orders for bot {bot_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to cancel orders: {str(e)}")
 
+@router.get("/all/trade-history", response_model=List[dict])
+async def get_all_bots_trade_history(
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """Get trade history for all bots"""
+    try:
+        from app.db.postgres import AsyncSessionLocal
+        from sqlalchemy import select
+        from app.models.bot_models import BotInstance, BotEvent, BotLine
+        
+        async with AsyncSessionLocal() as session:
+            # Get all bot instances
+            result = await session.execute(
+                select(BotInstance).order_by(BotInstance.created_at.desc())
+            )
+            bots = result.scalars().all()
+            
+            all_trade_history = []
+            
+            # Get trade history for each bot by reusing the logic from get_bot_trade_history
+            for bot in bots:
+                try:
+                    # Get bot events for this bot
+                    events_result = await session.execute(
+                        select(BotEvent)
+                        .where(BotEvent.bot_id == bot.id)
+                        .order_by(BotEvent.timestamp.desc())
+                    )
+                    events = events_result.scalars().all()
+                    
+                    # Get exit lines
+                    lines_result = await session.execute(
+                        select(BotLine)
+                        .where(BotLine.bot_id == bot.id)
+                        .where(BotLine.line_type == 'exit')
+                        .where(BotLine.is_active == True)
+                    )
+                    exit_lines = lines_result.scalars().all()
+                    
+                    # Track order IDs to avoid duplicates
+                    included_order_ids = set()
+                    included_exit_orders = {}
+                    has_individual_entry_orders = any(
+                        event.event_type in ("spot_entry_market_order", "spot_entry_limit_order")
+                        and (event.event_data or {}).get("order_status", "").upper() == "FILLED"
+                        for event in events
+                    )
+                    
+                    bot_trade_history = []
+                    
+                    # Add pending entry order
+                    if bot.entry_order_id and bot.entry_order_status == 'PENDING':
+                        bot_trade_history.append({
+                            "side": "BUY",
+                            "filled": "Pending",
+                            "target": "Entry",
+                            "filled_at": None,
+                            "shares_filled": bot.position_size or 0,
+                            "price": float(bot.current_price) if bot.current_price else 0.0,
+                            "order_id": bot.entry_order_id,
+                            "event_type": "entry_order_pending",
+                            "bot_id": bot.id,
+                            "bot_name": bot.name,
+                            "bot_symbol": bot.symbol,
+                            "bot_config_id": bot.config_id
+                        })
+                        included_order_ids.add(bot.entry_order_id)
+                    
+                    # Add stop loss order
+                    if bot.stop_loss_order_id and bot.is_bought:
+                        bot_trade_history.append({
+                            "side": "SELL",
+                            "filled": "Pending",
+                            "target": "Stop Loss",
+                            "filled_at": None,
+                            "shares_filled": bot.open_shares or 0,
+                            "price": float(bot.stop_loss_price) if bot.stop_loss_price else 0.0,
+                            "order_id": bot.stop_loss_order_id,
+                            "event_type": "stop_loss_order_active",
+                            "bot_id": bot.id,
+                            "bot_name": bot.name,
+                            "bot_symbol": bot.symbol,
+                            "bot_config_id": bot.config_id
+                        })
+                        included_order_ids.add(bot.stop_loss_order_id)
+                    
+                    # Process events (simplified version - reuse logic from get_bot_trade_history)
+                    for event in events:
+                        event_data = event.event_data or {}
+                        order_id = event_data.get("order_id")
+                        
+                        if order_id and order_id in included_order_ids:
+                            continue
+                        
+                        # Map event types to trade history format
+                        if event.event_type in ("spot_entry_market_order", "spot_entry_limit_order", "options_entry_market_order", "options_entry_limit_order"):
+                            if (event_data.get("order_status", "").upper() == "FILLED" or 
+                                event_data.get("order_status", "").upper() == "SUBMITTED"):
+                                bot_trade_history.append({
+                                    "side": "BUY",
+                                    "filled": "Yes" if event_data.get("order_status", "").upper() == "FILLED" else "Pending",
+                                    "target": event_data.get("target", "Entry"),
+                                    "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                                    "shares_filled": event_data.get("quantity", event_data.get("shares_filled", 0)),
+                                    "price": event_data.get("price", 0.0),
+                                    "order_id": order_id,
+                                    "event_type": event.event_type,
+                                    "bot_id": bot.id,
+                                    "bot_name": bot.name,
+                                    "bot_symbol": bot.symbol,
+                                    "bot_config_id": bot.config_id
+                                })
+                                if order_id:
+                                    included_order_ids.add(order_id)
+                        
+                        elif event.event_type in ("spot_exit_market_order", "spot_exit_limit_order", "options_exit_market_order", "options_exit_limit_order"):
+                            line_id = event_data.get("line_id", "")
+                            if order_id:
+                                included_order_ids.add(order_id)
+                            
+                            bot_trade_history.append({
+                                "side": "SELL",
+                                "filled": "Yes" if event_data.get("order_status", "").upper() == "FILLED" else "Pending",
+                                "target": event_data.get("target", "Exit"),
+                                "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                                "shares_filled": event_data.get("quantity", event_data.get("shares_filled", 0)),
+                                "price": event_data.get("price", 0.0),
+                                "order_id": order_id,
+                                "event_type": event.event_type,
+                                "bot_id": bot.id,
+                                "bot_name": bot.name,
+                                "bot_symbol": bot.symbol,
+                                "bot_config_id": bot.config_id
+                            })
+                        
+                        elif event.event_type in ("soft_stop_sell", "hard_stop_out_sell"):
+                            bot_trade_history.append({
+                                "side": "SELL",
+                                "filled": "Yes",
+                                "target": "Stop Loss" if event.event_type == "hard_stop_out_sell" else "Soft Stop",
+                                "filled_at": event.timestamp.isoformat() if event.timestamp else None,
+                                "shares_filled": event_data.get("shares_sold", event_data.get("quantity", 0)),
+                                "price": event_data.get("price", 0.0),
+                                "order_id": event_data.get("order_id"),
+                                "event_type": event.event_type,
+                                "bot_id": bot.id,
+                                "bot_name": bot.name,
+                                "bot_symbol": bot.symbol,
+                                "bot_config_id": bot.config_id
+                            })
+                    
+                    all_trade_history.extend(bot_trade_history)
+                    
+                except Exception as e:
+                    logger.warning(f"Error getting trade history for bot {bot.id}: {e}")
+                    continue
+            
+            # Sort by timestamp (most recent first)
+            all_trade_history.sort(key=lambda x: (
+                0 if x.get("filled") == "Pending" else 1,
+                x.get("filled_at") or ""
+            ), reverse=True)
+            
+            return all_trade_history
+            
+    except Exception as e:
+        logger.error(f"Error getting all bots trade history: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get all bots trade history: {str(e)}")
+
 @router.get("/{bot_id}/trade-history", response_model=List[dict])
 async def get_bot_trade_history(
     bot_id: int,
@@ -559,18 +728,23 @@ async def get_bot_trade_history(
                     })
                     if order_id:
                         included_order_ids.add(order_id)
-                elif event.event_type == "spot_exit_limit_order":
-                    # Individual exit limit order (can be filled or pending)
+                elif event.event_type == "spot_exit_limit_order" or event.event_type == "options_exit_limit_order":
+                    # Individual exit limit order (can be filled or pending) - handles both stocks and options
                     order_status = event_data.get("order_status", "").upper()
                     line_id = event_data.get("line_id", "")
+                    is_options = event.event_type == "options_exit_limit_order"
+                    
                     # For multi-exit mode, show line identifier if available
                     if line_id:
-                        target_label = f"Exit ({line_id})"
+                        target_label = f"Exit ({line_id})" if not is_options else f"Exit (Option)"
                     else:
-                        target_label = "Exit"
+                        target_label = "Exit" if not is_options else "Exit (Option)"
                     
                     # Create unique key for this exit order (order_id + line_id to handle same line updates)
                     exit_key = (order_id, line_id) if order_id else None
+                    
+                    # Get quantity - use 'quantity' field if available, otherwise fall back to 'shares_to_sell'
+                    quantity = event_data.get("quantity") or event_data.get("shares_to_sell", 0)
                     
                     if order_status == "FILLED":
                         # Exit order filled - always include filled orders
@@ -580,7 +754,7 @@ async def get_bot_trade_history(
                                 "filled": "Yes",
                                 "target": target_label,
                                 "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                                "shares_filled": event_data.get("shares_to_sell", 0),
+                                "shares_filled": quantity,
                                 "price": event_data.get("line_price", 0),
                                 "order_id": order_id,
                                 "event_type": event.event_type
@@ -597,7 +771,7 @@ async def get_bot_trade_history(
                                 "filled": "Cancelled",
                                 "target": target_label,
                                 "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                                "shares_filled": event_data.get("shares_to_sell", 0),
+                                "shares_filled": quantity,
                                 "price": event_data.get("line_price", 0),
                                 "order_id": order_id,
                                 "event_type": event.event_type
@@ -619,7 +793,7 @@ async def get_bot_trade_history(
                                 "filled": "Pending",
                                 "target": target_label,
                                 "filled_at": None,
-                                "shares_filled": event_data.get("shares_to_sell", 0),
+                                "shares_filled": quantity,
                                 "price": event_data.get("line_price", 0),
                                 "order_id": order_id,
                                 "event_type": event.event_type
@@ -634,7 +808,7 @@ async def get_bot_trade_history(
                             # Only update if current status is Pending (don't overwrite FILLED or CANCELLED)
                             if existing_entry.get("filled") == "Pending":
                                 # Update with more recent pending order data
-                                existing_entry["shares_filled"] = event_data.get("shares_to_sell", 0)
+                                existing_entry["shares_filled"] = quantity
                                 existing_entry["price"] = event_data.get("line_price", 0)
                                 existing_entry["order_id"] = order_id
                 elif event.event_type == "spot_position_partial_exit":

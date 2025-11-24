@@ -215,6 +215,134 @@ class IBClient:
         portfolio = self.ib.portfolio()
         return portfolio
     
+    async def get_account_equity(self) -> Optional[float]:
+        """
+        Get account Net Liquidation Value (equity) in base currency.
+        Returns None if unable to retrieve.
+        """
+        try:
+            await self.ensure_connected()
+            # Wrap synchronous call in thread with timeout to prevent blocking
+            account_summary = await asyncio.wait_for(
+                asyncio.to_thread(self.ib.accountSummary),
+                timeout=3.0
+            )
+            
+            # Look for NetLiquidation value
+            for summary in account_summary:
+                if summary.tag == 'NetLiquidation':
+                    try:
+                        equity = float(summary.value)
+                        logger.info(f"📊 Account equity (NetLiquidation): {equity}")
+                        return equity
+                    except (ValueError, AttributeError):
+                        continue
+            
+            logger.warning("⚠️ Could not find NetLiquidation in account summary")
+            return None
+        except asyncio.TimeoutError:
+            logger.error("⏱️ Timeout getting account equity (accountSummary took > 3s)")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting account equity: {e}")
+            return None
+    
+    async def get_account_cash(self) -> Optional[float]:
+        """
+        Get available cash balance in base currency.
+        Returns None if unable to retrieve.
+        """
+        try:
+            await self.ensure_connected()
+            # Wrap synchronous call in thread with timeout to prevent blocking
+            account_summary = await asyncio.wait_for(
+                asyncio.to_thread(self.ib.accountSummary),
+                timeout=3.0
+            )
+            
+            # Look for available cash (try different tags)
+            cash_tags = ['CashBalance', 'AvailableFunds', 'TotalCashValue', 'BuyingPower']
+            for tag in cash_tags:
+                for summary in account_summary:
+                    if summary.tag == tag:
+                        try:
+                            cash = float(summary.value)
+                            logger.info(f"📊 Account cash ({tag}): {cash}")
+                            return cash
+                        except (ValueError, AttributeError):
+                            continue
+            
+            logger.warning("⚠️ Could not find cash balance in account summary")
+            return None
+        except asyncio.TimeoutError:
+            logger.error("⏱️ Timeout getting account cash (accountSummary took > 3s)")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting account cash: {e}")
+            return None
+    
+    async def check_sufficient_cash(self, required_amount: float) -> tuple:
+        """
+        Check if account has sufficient cash for a purchase.
+        Returns (has_sufficient_cash, available_cash)
+        """
+        cash = await self.get_account_cash()
+        if cash is None:
+            # If we can't get cash, assume we can't verify
+            return (False, None)
+        
+        has_sufficient = cash >= required_amount
+        return (has_sufficient, cash)
+    
+    async def get_account_type_info(self) -> dict:
+        """
+        Get account type information (margin vs cash).
+        Returns dict with account type and relevant values.
+        """
+        try:
+            await self.ensure_connected()
+            # Wrap synchronous call in thread with timeout to prevent blocking
+            account_summary = await asyncio.wait_for(
+                asyncio.to_thread(self.ib.accountSummary),
+                timeout=3.0
+            )
+            
+            info = {
+                'account_type': None,
+                'equity': None,
+                'cash': None,
+                'buying_power': None
+            }
+            
+            for summary in account_summary:
+                tag = summary.tag
+                try:
+                    value = float(summary.value)
+                    if tag == 'NetLiquidation':
+                        info['equity'] = value
+                    elif tag == 'CashBalance' or tag == 'TotalCashValue':
+                        info['cash'] = value
+                    elif tag == 'BuyingPower':
+                        info['buying_power'] = value
+                    elif tag == 'AccountType':
+                        info['account_type'] = summary.value
+                except (ValueError, AttributeError):
+                    continue
+            
+            # Determine account type from available info
+            if info['buying_power'] and info['buying_power'] > (info['cash'] or 0):
+                info['account_type'] = 'MARGIN'
+            elif info['cash']:
+                info['account_type'] = 'CASH'
+            
+            return info
+        except asyncio.TimeoutError:
+            logger.error("⏱️ Timeout getting account type info (accountSummary took > 3s)")
+            return {}
+        except Exception as e:
+            logger.error(f"Error getting account type info: {e}")
+            return {}
+    
     async def get_option_chain(self, symbol: str) -> Optional[dict]:
         """
         Get option chain (expiration dates and strikes) from IBKR using reqSecDefOptParams
@@ -495,7 +623,13 @@ class IBClient:
     def on_error(self, reqId, errorCode, errorString, contract=None):
         # Ignore informational messages about connectivity
         if errorCode not in [2104, 2106, 2158]:
-             logger.error(f"IBKR Error: reqId={reqId}, code={errorCode}, msg='{errorString}'")
+            # Error 201: Minimum equity requirement for margin accounts
+            if errorCode == 201 and "2500" in errorString:
+                logger.error(f"❌ IBKR Error {errorCode}: Minimum equity requirement not met")
+                logger.error(f"   Your account needs at least $2500 CAD (or equivalent) to place orders in a margin account")
+                logger.error(f"   Solutions: 1) Deposit funds to reach $2500 minimum, 2) Switch to cash account, 3) Use paper trading account")
+            else:
+                logger.error(f"IBKR Error: reqId={reqId}, code={errorCode}, msg='{errorString}'")
 
     def on_disconnected(self):
         logger.warning("Event: IBKR Client has disconnected.")

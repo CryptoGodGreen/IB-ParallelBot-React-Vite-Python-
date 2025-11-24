@@ -1,0 +1,47 @@
+.status-report-header {
+  margin-bottom: 1.5rem;
+}
+
+.status-report-tabs {
+  display: flex;
+  gap: 0.5rem;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 2rem;
+}
+
+.tab-button {
+  padding: 0.75rem 1.5rem;
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-bottom: -2px;
+}
+
+.tab-button:hover {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tab-button.active {
+  color: white;
+  border-bottom-color: #3b82f6;
+  font-weight: 600;
+}
+
+.status-report-content {
+  min-height: 400px;
+}
+
+.status-report-content .page-container {
+  padding: 0;
+}
+
+.status-report-content .page-title {
+  margin-top: 0;
+}
+

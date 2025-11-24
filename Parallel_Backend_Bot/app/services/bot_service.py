@@ -2,7 +2,8 @@ import asyncio
 import logging
 import time
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, insert
 from sqlalchemy.orm import selectinload
@@ -136,8 +137,33 @@ class BotService:
         bot_state = self.active_bots[bot_id]
         bot_state['current_price'] = price
         
+        # Recalculate trend line prices BEFORE checking crossings (so we use current line prices)
+        await self._recalculate_line_prices(bot_id)
+        
         # Check for price crossings
         await self._check_price_crossings(bot_id, price)
+        
+        # Check if bot should be completed (all shares exited AND all exit orders are filled)
+        if bot_state.get('is_bought') and bot_state.get('open_shares', 0) <= 0 and bot_state.get('shares_exited', 0) > 0:
+            # Verify all exit orders are actually filled (not just SUBMITTED)
+            exit_order_keys = [key for key in bot_state.keys() if key.startswith('exit_order_')]
+            all_orders_filled = True
+            pending_orders = []
+            
+            for order_key in exit_order_keys:
+                order_info = bot_state.get(order_key)
+                if isinstance(order_info, dict):
+                    order_status = (order_info.get('status') or 'UNKNOWN').upper()
+                    if order_status not in ['FILLED', 'CANCELLED']:
+                        all_orders_filled = False
+                        pending_orders.append(f"{order_key} (status: {order_status})")
+            
+            if all_orders_filled:
+                logger.info(f"🎉 Bot {bot_id}: All shares exited (open_shares=0, shares_exited={bot_state.get('shares_exited', 0)}) and all exit orders filled - completing bot...")
+                await self._complete_bot(bot_id)
+                return  # Exit early since bot is completed
+            else:
+                logger.info(f"⏳ Bot {bot_id}: All shares marked as exited (open_shares=0, shares_exited={bot_state.get('shares_exited', 0)}), but waiting for exit orders to fill: {pending_orders}")
         
         # Check for soft stop and hard stop conditions
         await self._check_soft_stop_out(bot_id, price)
@@ -320,7 +346,7 @@ class BotService:
                     'is_running': bot.is_running,
                     'is_bought': bot.is_bought,
                     'current_price': bot.current_price,
-                    'previous_price': bot.current_price,  # Initialize with current price
+                    'previous_price': None,  # Will be initialized in _check_price_crossings to ensure proper crossing detection
                     'entry_price': bot.entry_price,
                     'total_position': bot.total_position,
                     'shares_entered': bot.shares_entered,
@@ -357,6 +383,25 @@ class BotService:
                     'filled_exit_lines': self._load_filled_exit_lines(bot)
                 }
                 
+                # If bot is in downtrend mode and has an open position, try to load option details from event logs
+                if trend_strategy == 'downtrend' and bot.is_bought and bot.open_shares > 0:
+                    from app.models.bot_models import BotEvent
+                    event_result = await session.execute(
+                        select(BotEvent)
+                        .where(BotEvent.bot_id == bot_id)
+                        .where(BotEvent.event_type == 'options_position_opened')
+                        .order_by(BotEvent.timestamp.desc())
+                        .limit(1)
+                    )
+                    option_event = event_result.scalar_one_or_none()
+                    if option_event and option_event.event_data:
+                        event_data = option_event.event_data
+                        if 'strike' in event_data and 'expiry' in event_data:
+                            self.active_bots[bot_id]['option_strike'] = event_data['strike']
+                            self.active_bots[bot_id]['option_expiry'] = event_data['expiry']
+                            self.active_bots[bot_id]['option_right'] = 'P'  # Default to PUT for downtrend
+                            logger.info(f"✅ Bot {bot_id}: Loaded option details from event log: Strike={event_data['strike']}, Expiry={event_data['expiry']}")
+                
                 # If bot is already bought but has no exit orders, create them
                 if bot.is_bought and not any(key.startswith('exit_order_') for key in self.active_bots[bot_id].keys()):
                     logger.info(f"🤖 Bot {bot_id}: Already bought but no exit orders found, creating them...")
@@ -378,6 +423,30 @@ class BotService:
             # Get current bot state to include final shares_exited value
             bot_state = self.active_bots.get(bot_id, {})
             
+            # Cancel any pending exit orders before completing
+            logger.info(f"🔄 Bot {bot_id}: Cancelling pending exit orders before completion...")
+            from app.utils.ib_client import ib_client
+            exit_order_keys = [key for key in bot_state.keys() if key.startswith('exit_order_')]
+            cancelled_count = 0
+            for order_key in exit_order_keys:
+                order_info = bot_state.get(order_key)
+                if isinstance(order_info, dict):
+                    order_id = order_info.get('order_id')
+                    status = (order_info.get('status') or 'UNKNOWN').upper()
+                    if order_id and status in ['SUBMITTED', 'PENDING', 'PRESUBMITTED', 'WORKING', 'UNKNOWN']:
+                        try:
+                            success = await ib_client.cancel_order(order_id)
+                            if success:
+                                logger.info(f"✅ Bot {bot_id}: Cancelled pending exit order {order_id} ({order_key})")
+                                cancelled_count += 1
+                            else:
+                                logger.warning(f"⚠️ Bot {bot_id}: Failed to cancel exit order {order_id}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Bot {bot_id}: Error cancelling exit order {order_id}: {e}")
+            
+            if cancelled_count > 0:
+                logger.info(f"✅ Bot {bot_id}: Cancelled {cancelled_count} pending exit orders")
+            
             # Update database
             await self._update_bot_in_db(bot_id, {
                 'is_active': False,
@@ -393,9 +462,13 @@ class BotService:
                 del self.active_bots[bot_id]
             
             # Log completion event
+            # Determine strategy for logging
+            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
+            strategy_name = 'downtrend_options' if trend_strategy == 'downtrend' else 'uptrend_spot_limit'
+            
             await self._log_bot_event(bot_id, 'bot_completed', {
                 'reason': 'all_shares_sold',
-                'strategy': 'uptrend_spot_limit'
+                'strategy': strategy_name
             })
             
             logger.info(f"🎉 Bot {bot_id}: COMPLETED! All shares sold successfully.")
@@ -489,38 +562,102 @@ class BotService:
         """Check for price crossings and execute trades"""
         bot_state = self.active_bots[bot_id]
         
-        # Get previous price for directional crossing detection
-        previous_price = bot_state.get('previous_price', current_price)
+        # Get trend strategy to determine initialization direction
+        trend_strategy = bot_state.get('trend_strategy', 'uptrend')
         
-        # Check entry lines (upward crossing or current price above entry)
+        # Get previous price for directional crossing detection
+        # Initialize based on trend strategy to ensure proper crossing detection
+        previous_price = bot_state.get('previous_price')
+        if previous_price is None:
+            entry_lines = bot_state.get('entry_lines', [])
+            if entry_lines:
+                if trend_strategy == 'downtrend':
+                    # For downtrend: entry lines are above current price, initialize above entry lines
+                    max_entry_price = max(line['price'] for line in entry_lines)
+                    previous_price = max_entry_price + 1.0  # Set to 1 dollar above highest entry line
+                else:  # uptrend
+                    # For uptrend: entry lines are below current price, initialize below entry lines
+                    min_entry_price = min(line['price'] for line in entry_lines)
+                    previous_price = min_entry_price - 1.0  # Set to 1 dollar below lowest entry line
+            else:
+                # Fallback based on strategy
+                if trend_strategy == 'downtrend':
+                    previous_price = current_price + 1.0  # Above current price
+                else:
+                    previous_price = current_price - 1.0  # Below current price
+            bot_state['previous_price'] = previous_price
+            logger.info(f"🤖 Bot {bot_id}: Initialized previous_price to ${previous_price:.2f} for {trend_strategy} crossing detection")
+        
+        # Log crossing detection details for debugging
+        logger.info(f"🔍 Bot {bot_id}: Crossing check - Previous: ${previous_price:.2f}, Current: ${current_price:.2f}, Strategy: {trend_strategy}")
+        
+        # Check entry lines - crossing direction depends on trend strategy
         # In multi-buy mode, continue checking until all entry lines are crossed
         if not bot_state['is_bought'] or bot_state.get('multi_buy') == 'enabled':
             # Count how many entry lines have been crossed
             crossed_entry_count = sum(1 for entry_line in bot_state['entry_lines'] 
                                      if entry_line['id'] in bot_state['crossed_lines'])
             
+            logger.info(f"🔍 Bot {bot_id}: Checking {len(bot_state['entry_lines'])} entry lines, {crossed_entry_count} already crossed")
+            
             for line in bot_state['entry_lines']:
                 # Skip if already crossed (unless it's the last entry line to complete position)
                 if line['id'] in bot_state['crossed_lines']:
+                    logger.debug(f"⏭️ Bot {bot_id}: Skipping entry line {line['id']} (already crossed)")
                     continue
                 
-                # Check for upward crossing: previous_price < line_price <= current_price
-                if previous_price < line['price'] <= current_price:
-                    
-                    logger.info(f"🤖 Bot {bot_id}: ENTRY CROSSING DETECTED! "
-                              f"Line: ${line['price']}, Current: ${current_price}")
-                    
-                    await self._execute_entry_trade(bot_id, line, current_price)
-                    bot_state['crossed_lines'].add(line['id'])
+                line_price = line['price']
                 
-                # Fallback: If current price is above entry line and no crossing detected yet
-                elif current_price > line['price']:
+                if trend_strategy == 'downtrend':
+                    # DOWNTREND: Entry line is above current price, trigger on DOWNWARD crossing (above → below)
+                    # Check for downward crossing: previous_price > line_price >= current_price
+                    condition1 = previous_price > line_price
+                    condition2 = line_price >= current_price
+                    crossing_detected = condition1 and condition2
                     
-                    logger.info(f"🤖 Bot {bot_id}: ENTRY PRICE ABOVE LINE! "
-                              f"Line: ${line['price']}, Current: ${current_price}")
+                    logger.info(f"🔍 Bot {bot_id}: Checking entry line ${line_price:.2f} (DOWNTREND)")
+                    logger.info(f"   Previous: ${previous_price:.2f}, Line: ${line_price:.2f}, Current: ${current_price:.2f}")
+                    logger.info(f"   Condition 1 (previous > line): {previous_price:.2f} > {line_price:.2f} = {condition1}")
+                    logger.info(f"   Condition 2 (line >= current): {line_price:.2f} >= {current_price:.2f} = {condition2}")
+                    logger.info(f"   Crossing detected: {crossing_detected}")
                     
-                    await self._execute_entry_trade(bot_id, line, current_price)
-                    bot_state['crossed_lines'].add(line['id'])
+                    if crossing_detected:
+                        logger.info(f"🤖 Bot {bot_id}: ENTRY CROSSING DETECTED (DOWNTREND - DOWNWARD)! "
+                                  f"Line: ${line_price:.2f}, Previous: ${previous_price:.2f}, Current: ${current_price:.2f}")
+                        
+                        await self._execute_entry_trade(bot_id, line, current_price)
+                        bot_state['crossed_lines'].add(line['id'])
+                    
+                    # Fallback: If current price is below entry line and no crossing detected yet
+                    elif current_price < line_price:
+                        logger.info(f"🤖 Bot {bot_id}: ENTRY PRICE BELOW LINE (DOWNTREND fallback)! "
+                                  f"Line: ${line_price:.2f}, Current: ${current_price:.2f}")
+                        
+                        await self._execute_entry_trade(bot_id, line, current_price)
+                        bot_state['crossed_lines'].add(line['id'])
+                        
+                else:  # uptrend
+                    # UPTREND: Entry line is below current price, trigger on UPWARD crossing (below → above)
+                    # Check for upward crossing: previous_price < line_price <= current_price
+                    logger.debug(f"🤖 Bot {bot_id}: Checking entry line ${line_price:.2f} (UPTREND) - "
+                               f"Previous: ${previous_price:.2f}, Current: ${current_price:.2f}, "
+                               f"Crossing condition: {previous_price} < {line_price} <= {current_price} = "
+                               f"{previous_price < line_price} and {line_price <= current_price}")
+                    
+                    if previous_price < line_price <= current_price:
+                        logger.info(f"🤖 Bot {bot_id}: ENTRY CROSSING DETECTED (UPTREND - UPWARD)! "
+                                  f"Line: ${line_price:.2f}, Previous: ${previous_price:.2f}, Current: ${current_price:.2f}")
+                        
+                        await self._execute_entry_trade(bot_id, line, current_price)
+                        bot_state['crossed_lines'].add(line['id'])
+                    
+                    # Fallback: If current price is above entry line and no crossing detected yet
+                    elif current_price > line_price:
+                        logger.info(f"🤖 Bot {bot_id}: ENTRY PRICE ABOVE LINE (UPTREND fallback)! "
+                                  f"Line: ${line_price:.2f}, Current: ${current_price:.2f}")
+                        
+                        await self._execute_entry_trade(bot_id, line, current_price)
+                        bot_state['crossed_lines'].add(line['id'])
         
         # Check exit lines (downward crossing)
         if bot_state['is_bought'] and bot_state['open_shares'] > 0:
@@ -565,6 +702,12 @@ class BotService:
                 bot_state.get('entry_order_status') == 'PENDING' and 
                 bot_state.get('is_bought') == False):
                 await self._check_entry_order_status(bot_id, current_price, should_update_prices)
+            
+            # Check if bot should be completed (all shares exited, regardless of order status)
+            if bot_state.get('is_bought') and bot_state.get('open_shares', 0) <= 0 and bot_state.get('shares_exited', 0) > 0:
+                logger.info(f"🎉 Bot {bot_id}: All shares exited (open_shares=0, shares_exited={bot_state.get('shares_exited', 0)}) - completing bot...")
+                await self._complete_bot(bot_id)
+                return  # Exit early since bot is completed
             
             # Monitor exit orders
             exit_orders_found = 0
@@ -737,10 +880,18 @@ class BotService:
             
             logger.info(f"🎯 Bot {bot_id}: Manual fill check - Current: ${current_price:.2f}, Exit line: ${exit_line_price:.2f}, Order status: {order_status_normalized}")
             
-            # Check if current price is above exit line (manual fill detection)
-            if current_price >= exit_line_price and order_status_normalized in ['UNKNOWN', 'SUBMITTED', 'PENDING', 'PRESUBMITTED', 'WORKING']:
-                logger.info(f"🎯 Bot {bot_id}: Current price ${current_price:.2f} >= Exit line ${exit_line_price:.2f}, marking as filled (status was: {order_status_normalized})")
-                order_status_normalized = 'FILLED'
+            # Manual fill detection: Only for UPTREND (stock trading), not for DOWNTREND (options)
+            # For options, we must rely on actual IBKR order status, not stock price comparison
+            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
+            
+            if trend_strategy == 'uptrend':
+                # UPTREND: Check if current stock price is above exit line (limit sell order should fill)
+                if current_price >= exit_line_price and order_status_normalized in ['UNKNOWN', 'SUBMITTED', 'PENDING', 'PRESUBMITTED', 'WORKING']:
+                    logger.info(f"🎯 Bot {bot_id}: Current price ${current_price:.2f} >= Exit line ${exit_line_price:.2f}, marking as filled (status was: {order_status_normalized})")
+                    order_status_normalized = 'FILLED'
+            else:
+                # DOWNTREND: For options, we can't infer fill from stock price - only trust IBKR order status
+                logger.debug(f"🎯 Bot {bot_id}: Options trading - relying on IBKR order status only (not using manual fill detection)")
             
             if order_status_normalized == 'FILLED':
                 logger.info(f"✅ Bot {bot_id}: Exit order {order_id} FILLED!")
@@ -774,93 +925,119 @@ class BotService:
                 await self._update_bot_in_db(bot_id, db_update)
                 
                 # Log exit order filled event (so frontend shows the exit order as filled)
-                await self._log_bot_event(bot_id, 'spot_exit_limit_order', {
+                trend_strategy = bot_state.get('trend_strategy', 'uptrend')
+                event_type = 'options_exit_limit_order' if trend_strategy == 'downtrend' else 'spot_exit_limit_order'
+                strategy_name = 'downtrend_options' if trend_strategy == 'downtrend' else 'uptrend_spot_limit'
+                await self._log_bot_event(bot_id, event_type, {
                     'line_price': exit_line_price,
                     'current_price': current_price,
                     'shares_to_sell': shares_sold,
                     'order_id': order_id,
                     'order_status': 'FILLED',
                     'line_id': line_id,
-                    'strategy': 'uptrend_spot_limit'
+                    'strategy': strategy_name
                 })
                 
                 # Log partial exit event (for position tracking)
-                await self._log_bot_event(bot_id, 'spot_position_partial_exit', {
+                partial_event_type = 'options_position_partial_exit' if trend_strategy == 'downtrend' else 'spot_position_partial_exit'
+                await self._log_bot_event(bot_id, partial_event_type, {
                     'shares_sold': shares_sold,
                     'remaining_shares': bot_state['open_shares'],
                     'total_exited': bot_state['shares_exited'],
                     'order_id': order_id,
                     'line_price': exit_line_price,
                     'line_id': line_id,
-                    'strategy': 'uptrend_spot_limit'
+                    'strategy': strategy_name
                 })
                 
                 logger.info(f"🤖 Bot {bot_id}: Sold {shares_sold} shares at ${exit_line_price:.2f}, {bot_state['open_shares']} remaining")
                 
                 # Check if all shares are sold - if so, complete the bot
                 if bot_state['open_shares'] <= 0:
-                    bot_state['is_bought'] = False
-                    bot_state['crossed_lines'] = set()
-                    logger.info(f"🎉 Bot {bot_id}: All shares sold! Completing bot...")
-                    await self._complete_bot(bot_id)
-                    return  # Exit early since bot is completed
+                    # Check if all exit orders are actually filled before completing
+                    exit_order_keys = [key for key in bot_state.keys() if key.startswith('exit_order_')]
+                    all_orders_filled = True
+                    pending_orders = []
+                    
+                    for order_key in exit_order_keys:
+                        order_info = bot_state.get(order_key)
+                        if isinstance(order_info, dict):
+                            order_status = (order_info.get('status') or 'UNKNOWN').upper()
+                            if order_status not in ['FILLED', 'CANCELLED']:
+                                all_orders_filled = False
+                                pending_orders.append(f"{order_key} (status: {order_status})")
+                    
+                    if all_orders_filled:
+                        bot_state['is_bought'] = False
+                        bot_state['crossed_lines'] = set()
+                        logger.info(f"🎉 Bot {bot_id}: All shares sold and all exit orders filled! Completing bot...")
+                        await self._complete_bot(bot_id)
+                        return  # Exit early since bot is completed
+                    else:
+                        logger.info(f"⏳ Bot {bot_id}: All shares marked as sold (open_shares=0), but waiting for exit orders to fill: {pending_orders}")
                 
             # Always check if exit order price needs updating (every cycle, not just every 30 seconds)
+            # Skip price updates for options (downtrend) since they use MARKET orders (no price to update)
+            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
             if order_status_normalized in ['SUBMITTED', 'UNKNOWN', 'PENDING', 'PRESUBMITTED', 'WORKING']:
-                # Recalculate exit line price from trend line (not current market price)
-                line_id = order_info.get('line_id', '')
-                logger.info(f"🔄 Bot {bot_id}: Checking price update for exit order {order_id}, line_id={line_id}")
-                
-                exit_line = None
-                
-                # Find the exit line for this order
-                exit_lines = bot_state.get('exit_lines', [])
-                logger.info(f"🔄 Bot {bot_id}: Searching {len(exit_lines)} exit lines for line_id={line_id}")
-                
-                for exit_line_candidate in exit_lines:
-                    candidate_id = exit_line_candidate.get('id', '')
-                    logger.debug(f"🔄 Bot {bot_id}: Checking exit line candidate: id={candidate_id}")
-                    if candidate_id == line_id:
-                        exit_line = exit_line_candidate
-                        logger.info(f"✅ Bot {bot_id}: Found exit line {line_id} for order {order_id}")
-                        break
-                
-                if exit_line and exit_line.get('points'):
-                    # Recalculate exit line price from trend line points
-                    exit_line_price_new = self._calculate_trend_line_price(exit_line['points'])
-                    
-                    # Get contract specs to round price to minimum tick
-                    specs = ib_client.get_specs(bot_state['symbol'])
-                    min_tick = specs.get('min_tick', 0.01) if specs else 0.01
-                    
-                    # Round price to minimum tick
-                    def round_to_tick(price: float, tick: float) -> float:
-                        return round(round(price / tick) * tick, 6)
-                    
-                    exit_line_price_rounded = round_to_tick(exit_line_price_new, min_tick)
-                    old_price_raw = order_info.get('price', 0)
-                    old_price = float(old_price_raw)
-                    # Round old price to min_tick for accurate comparison
-                    old_price_rounded = round_to_tick(old_price, min_tick)
-                    
-                    # Compare rounded prices directly - update if they're different
-                    # Use a small epsilon (1/1000 of min_tick) for floating point comparison
-                    epsilon = min_tick * 0.001  # Very small epsilon (0.00001 for 0.01 tick)
-                    price_diff = abs(exit_line_price_rounded - old_price_rounded)
-                    
-                    logger.info(f"🔄 Bot {bot_id}: Exit order {order_id} price check - Old: ${old_price:.6f} (raw: {old_price_raw}, rounded: ${old_price_rounded:.6f}), New: ${exit_line_price_rounded:.6f}, Diff: ${price_diff:.9f}, MinTick: {min_tick}, Epsilon: {epsilon}")
-                    
-                    # Update if rounded prices are different (using epsilon for floating point safety)
-                    if price_diff > epsilon:
-                        logger.info(f"✅ Bot {bot_id}: Updating exit order {order_id} price from ${old_price:.6f} to ${exit_line_price_rounded:.6f} (trend line price, diff: ${price_diff:.9f} > epsilon: {epsilon})")
-                        await self._update_exit_order_price(bot_id, order_key, order_info, exit_line_price_rounded)
-                    else:
-                        logger.info(f"⏭️ Bot {bot_id}: Exit order {order_id} price unchanged (${exit_line_price_rounded:.6f} vs ${old_price_rounded:.6f}, diff: ${price_diff:.9f} <= epsilon: {epsilon})")
+                if trend_strategy == 'downtrend':
+                    # Options use MARKET orders - no price to update
+                    logger.debug(f"🔄 Bot {bot_id}: Skipping price update for options exit order {order_id} (market orders don't have prices)")
                 else:
-                    if not exit_line:
-                        logger.warning(f"⚠️ Bot {bot_id}: Could not find exit line with id={line_id} for order {order_id}. Available exit line IDs: {[e.get('id') for e in exit_lines]}")
+                    # Recalculate exit line price from trend line (not current market price) for stock LIMIT orders
+                    line_id = order_info.get('line_id', '')
+                    logger.info(f"🔄 Bot {bot_id}: Checking price update for exit order {order_id}, line_id={line_id}")
+                    
+                    exit_line = None
+                    
+                    # Find the exit line for this order
+                    exit_lines = bot_state.get('exit_lines', [])
+                    logger.info(f"🔄 Bot {bot_id}: Searching {len(exit_lines)} exit lines for line_id={line_id}")
+                    
+                    for exit_line_candidate in exit_lines:
+                        candidate_id = exit_line_candidate.get('id', '')
+                        logger.debug(f"🔄 Bot {bot_id}: Checking exit line candidate: id={candidate_id}")
+                        if candidate_id == line_id:
+                            exit_line = exit_line_candidate
+                            logger.info(f"✅ Bot {bot_id}: Found exit line {line_id} for order {order_id}")
+                            break
+                    
+                    if exit_line and exit_line.get('points'):
+                        # Recalculate exit line price from trend line points
+                        exit_line_price_new = self._calculate_trend_line_price(exit_line['points'])
+                        
+                        # Get contract specs to round price to minimum tick
+                        specs = ib_client.get_specs(bot_state['symbol'])
+                        min_tick = specs.get('min_tick', 0.01) if specs else 0.01
+                        
+                        # Round price to minimum tick
+                        def round_to_tick(price: float, tick: float) -> float:
+                            return round(round(price / tick) * tick, 6)
+                        
+                        exit_line_price_rounded = round_to_tick(exit_line_price_new, min_tick)
+                        old_price_raw = order_info.get('price', 0)
+                        old_price = float(old_price_raw)
+                        # Round old price to min_tick for accurate comparison
+                        old_price_rounded = round_to_tick(old_price, min_tick)
+                        
+                        # Compare rounded prices directly - update if they're different
+                        # Use a small epsilon (1/1000 of min_tick) for floating point comparison
+                        epsilon = min_tick * 0.001  # Very small epsilon (0.00001 for 0.01 tick)
+                        price_diff = abs(exit_line_price_rounded - old_price_rounded)
+                        
+                        logger.info(f"🔄 Bot {bot_id}: Exit order {order_id} price check - Old: ${old_price:.6f} (raw: {old_price_raw}, rounded: ${old_price_rounded:.6f}), New: ${exit_line_price_rounded:.6f}, Diff: ${price_diff:.9f}, MinTick: {min_tick}, Epsilon: {epsilon}")
+                        
+                        # Update if rounded prices are different (using epsilon for floating point safety)
+                        if price_diff > epsilon:
+                            logger.info(f"✅ Bot {bot_id}: Updating exit order {order_id} price from ${old_price:.6f} to ${exit_line_price_rounded:.6f} (trend line price, diff: ${price_diff:.9f} > epsilon: {epsilon})")
+                            await self._update_exit_order_price(bot_id, order_key, order_info, exit_line_price_rounded)
+                        else:
+                            logger.info(f"⏭️ Bot {bot_id}: Exit order {order_id} price unchanged (${exit_line_price_rounded:.6f} vs ${old_price_rounded:.6f}, diff: ${price_diff:.9f} <= epsilon: {epsilon})")
                     else:
-                        logger.warning(f"⚠️ Bot {bot_id}: Exit line {line_id} found but has no points data for order {order_id}")
+                        if not exit_line:
+                            logger.warning(f"⚠️ Bot {bot_id}: Could not find exit line with id={line_id} for order {order_id}. Available exit line IDs: {[e.get('id') for e in exit_lines]}")
+                        else:
+                            logger.warning(f"⚠️ Bot {bot_id}: Exit line {line_id} found but has no points data for order {order_id}")
             else:
                 logger.debug(f"🔄 Bot {bot_id}: Exit order {order_id} status {order_status_normalized} is not active, skipping price update")
                 
@@ -911,7 +1088,9 @@ class BotService:
             logger.error(f"Error updating exit order price for bot {bot_id}: {e}")
     
     async def _create_exit_orders_on_position_open(self, bot_id: int, current_price: float, force_resubmit: bool = False):
-        """Create exit limit orders for all exit lines when position is opened or resubmit if missing"""
+        """Create exit orders for all exit lines when position is opened or resubmit if missing
+        For options (downtrend), skip creating orders immediately - they will be created when stock price crosses exit line
+        For stocks (uptrend), create LIMIT orders immediately"""
         try:
             bot_state = self.active_bots[bot_id]
             
@@ -937,6 +1116,13 @@ class BotService:
             total_exit_lines = len(bot_state['exit_lines'])
             if total_exit_lines == 0:
                 logger.warning(f"Bot {bot_id}: No exit lines found - cannot create exit orders")
+                return
+            
+            # Check trend strategy - for options (downtrend), don't create orders immediately
+            # Orders will be created when stock price crosses exit lines (via _execute_options_exit_trade)
+            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
+            if trend_strategy == 'downtrend':
+                logger.info(f"🤖 Bot {bot_id}: Options trading (downtrend) - skipping immediate exit order creation. Orders will be placed when stock price crosses exit lines.")
                 return
             
             # Load filled exit lines from bot_state (set of line IDs that have been filled)
@@ -1127,32 +1313,111 @@ class BotService:
                     # Get current price for this exit line
                     exit_line_price = self._calculate_trend_line_price(exit_line['points'])
                     
-                    # Place limit sell order
+                    # Place limit sell order - check trend strategy to use correct contract type
                     from app.utils.ib_client import ib_client
-                    contract = await ib_client.qualify_stock(bot_state['symbol'])
-                    if not contract:
-                        logger.error(f"❌ Bot {bot_id}: Could not qualify {bot_state['symbol']} for exit order on line {exit_line['id']}")
-                        continue
+                    trend_strategy = bot_state.get('trend_strategy', 'uptrend')
                     
-                    # Get contract specs to round price to minimum tick
-                    specs = ib_client.get_specs(bot_state['symbol'])
-                    min_tick = specs.get('min_tick', 0.01) if specs else 0.01
+                    if trend_strategy == 'downtrend':
+                        # DOWNTREND: Use option contract
+                        contract = bot_state.get('option_contract')
+                        if not contract:
+                            # Try to reconstruct the contract from stored option details
+                            option_strike = bot_state.get('option_strike')
+                            option_expiry = bot_state.get('option_expiry')
+                            option_right = bot_state.get('option_right', 'P')
+                            symbol = bot_state.get('symbol')
+                            
+                            if option_strike and option_expiry and symbol:
+                                logger.info(f"🔄 Bot {bot_id}: Reconstructing option contract for exit order: {symbol} {option_expiry} {option_strike} {option_right}")
+                                from ib_async import Option
+                                contract = Option(
+                                    symbol=symbol,
+                                    lastTradeDateOrContractMonth=str(option_expiry),
+                                    strike=float(option_strike),
+                                    right=option_right,
+                                    exchange='SMART'
+                                )
+                                
+                                # Qualify the contract
+                                try:
+                                    details_list = await ib_client.ib.reqContractDetailsAsync(contract)
+                                    if details_list and len(details_list) > 0:
+                                        contract = details_list[0].contract
+                                        bot_state['option_contract'] = contract
+                                    else:
+                                        logger.error(f"❌ Bot {bot_id}: Could not qualify option contract for exit order")
+                                        continue
+                                except Exception as e:
+                                    logger.error(f"❌ Bot {bot_id}: Error qualifying option contract: {e}")
+                                    continue
+                            else:
+                                logger.error(f"❌ Bot {bot_id}: No option contract found for exit order")
+                                continue
+                        
+                        # Verify this is an option contract
+                        if not hasattr(contract, 'strike') or not hasattr(contract, 'lastTradeDateOrContractMonth'):
+                            logger.error(f"❌ Bot {bot_id}: Contract is not an option contract for exit order!")
+                            continue
+                        
+                        logger.info(f"📋 Bot {bot_id}: Using option contract for exit order: {contract.symbol} {contract.lastTradeDateOrContractMonth} {contract.strike} {contract.right}")
+                        
+                        # For options, use MARKET orders (not LIMIT) since option prices are different from stock prices
+                        # The stock price trend line is only used to trigger WHEN to exit, not WHAT price to use
+                        # Set exit_line_price_rounded for logging purposes (using stock price from trend line)
+                        exit_line_price_rounded = exit_line_price  # Use stock price for logging, even though order is market
+                        contract_type = "contracts"
+                        logger.info(f"🤖 Bot {bot_id}: Creating MARKET exit order for line {exit_line['id']} - {shares_to_sell} {contract_type} (options use market orders)")
+                        
+                        from ib_async import MarketOrder
+                        order = MarketOrder("SELL", shares_to_sell)
+                    else:
+                        # UPTREND: Use stock contract with LIMIT orders
+                        contract = await ib_client.qualify_stock(bot_state['symbol'])
+                        if not contract:
+                            logger.error(f"❌ Bot {bot_id}: Could not qualify {bot_state['symbol']} for exit order on line {exit_line['id']}")
+                            continue
+                        
+                        # Get contract specs to round price to minimum tick
+                        specs = ib_client.get_specs(bot_state['symbol'])
+                        min_tick = specs.get('min_tick', 0.01) if specs else 0.01
+                        
+                        # Round price to minimum tick to avoid Error 110
+                        def round_to_tick(price: float, tick: float) -> float:
+                            return round(round(price / tick) * tick, 6)
+                        
+                        exit_line_price_rounded = round_to_tick(exit_line_price, min_tick)
+                        
+                        contract_type = "shares"
+                        logger.info(f"🤖 Bot {bot_id}: Creating LIMIT exit order for line {exit_line['id']} - {shares_to_sell} {contract_type} at ${exit_line_price_rounded:.6f} (original: ${exit_line_price:.6f}, min_tick: {min_tick})")
+                        
+                        from ib_async import LimitOrder
+                        order = LimitOrder("SELL", shares_to_sell, exit_line_price_rounded)
                     
-                    # Round price to minimum tick to avoid Error 110
-                    def round_to_tick(price: float, tick: float) -> float:
-                        return round(round(price / tick) * tick, 6)
-                    
-                    exit_line_price_rounded = round_to_tick(exit_line_price, min_tick)
-                    
-                    logger.info(f"🤖 Bot {bot_id}: Creating exit order for line {exit_line['id']} - {shares_to_sell} shares at ${exit_line_price_rounded:.6f} (original: ${exit_line_price:.6f}, min_tick: {min_tick})")
-                    
-                    from ib_async import LimitOrder
-                    order = LimitOrder("SELL", shares_to_sell, exit_line_price_rounded)
-                    trade = await ib_client.place_order(contract, order)
+                    try:
+                        trade = await ib_client.place_order(contract, order)
+                    except Exception as e:
+                        error_msg = str(e)
+                        # Check for IBKR minimum equity requirement error
+                        if "2500" in error_msg or "MINIMUM" in error_msg.upper() or "201" in error_msg:
+                            account_equity = await ib_client.get_account_equity()
+                            if account_equity:
+                                logger.error(f"❌ Bot {bot_id}: Exit order rejected - Account equity (${account_equity:.2f}) is below IBKR minimum requirement of $2500 CAD (or equivalent)")
+                                logger.error(f"   Please deposit funds to reach minimum equity requirement, or switch to a cash account")
+                            else:
+                                logger.error(f"❌ Bot {bot_id}: Exit order rejected - IBKR requires minimum equity of $2500 CAD (or equivalent) for margin accounts")
+                                logger.error(f"   Error: {error_msg}")
+                            # Don't raise - just log and skip this exit order
+                            continue
+                        else:
+                            # Re-raise other errors
+                            raise
                     
                     if trade:
                         order_id = trade.order.orderId
-                        logger.info(f"✅ Bot {bot_id}: Exit order {order_id} placed for line {exit_line['id']} - {shares_to_sell} shares at ${exit_line_price_rounded:.6f} (rounded from ${exit_line_price:.6f})")
+                        if trend_strategy == 'downtrend':
+                            logger.info(f"✅ Bot {bot_id}: Exit MARKET order {order_id} placed for line {exit_line['id']} - {shares_to_sell} {contract_type} (options use market orders)")
+                        else:
+                            logger.info(f"✅ Bot {bot_id}: Exit LIMIT order {order_id} placed for line {exit_line['id']} - {shares_to_sell} {contract_type} at ${exit_line_price_rounded:.6f} (rounded from ${exit_line_price:.6f})")
 
                         initial_status = await ib_client.await_order_submission(trade, timeout=6.0)
                         normalized_status = (initial_status or 'PENDING').strip().upper()
@@ -1160,12 +1425,17 @@ class BotService:
                         logger.info(f"📊 Bot {bot_id}: Exit order {order_id} initial status: {normalized_status}")
 
                         if normalized_status in {'CANCELLED', 'INACTIVE', 'APICANCELLED', 'REJECTED', 'ERROR'}:
-                            logger.error(
-                                f"❌ Bot {bot_id}: Exit order {order_id} rejected with status {normalized_status} at price ${exit_line_price_rounded:.6f}"
-                            )
+                            if trend_strategy == 'downtrend':
+                                logger.error(
+                                    f"❌ Bot {bot_id}: Exit MARKET order {order_id} rejected with status {normalized_status}"
+                                )
+                            else:
+                                logger.error(
+                                    f"❌ Bot {bot_id}: Exit LIMIT order {order_id} rejected with status {normalized_status} at price ${exit_line_price_rounded:.6f}"
+                                )
                             await self._log_bot_event(bot_id, 'exit_order_rejected', {
                                 'line_id': exit_line['id'],
-                                'line_price': exit_line_price_rounded,  # Use rounded price
+                                'line_price': exit_line_price_rounded if trend_strategy != 'downtrend' else exit_line_price,  # Stock price for logging
                                 'shares_to_sell': shares_to_sell,
                                 'order_id': order_id,
                                 'status': normalized_status,
@@ -1173,9 +1443,14 @@ class BotService:
                             continue
 
                         if normalized_status == 'FILLED':
-                            logger.info(
-                                f"✅ Bot {bot_id}: Exit order {order_id} filled immediately at ${exit_line_price_rounded:.6f}"
-                            )
+                            if trend_strategy == 'downtrend':
+                                logger.info(
+                                    f"✅ Bot {bot_id}: Exit MARKET order {order_id} filled immediately (options use market orders)"
+                                )
+                            else:
+                                logger.info(
+                                    f"✅ Bot {bot_id}: Exit LIMIT order {order_id} filled immediately at ${exit_line_price_rounded:.6f}"
+                                )
                             bot_state['shares_exited'] = bot_state.get('shares_exited', 0) + shares_to_sell
                             bot_state['open_shares'] = max(0, bot_state.get('open_shares', 0) - shares_to_sell)
 
@@ -1203,26 +1478,33 @@ class BotService:
                             await self._update_bot_in_db(bot_id, db_update)
 
                             # Log exit order filled event (so frontend shows the exit order as filled)
-                            await self._log_bot_event(bot_id, 'spot_exit_limit_order', {
-                                'line_price': exit_line_price_rounded,
+                            event_type = 'options_exit_limit_order' if trend_strategy == 'downtrend' else 'spot_exit_limit_order'
+                            strategy_name = 'downtrend_options' if trend_strategy == 'downtrend' else 'uptrend_spot_limit'
+                            # For options, use stock price from trend line for logging
+                            log_price = exit_line_price_rounded if trend_strategy != 'downtrend' else exit_line_price
+                            await self._log_bot_event(bot_id, event_type, {
+                                'line_price': log_price,
                                 'current_price': current_price,
                                 'shares_to_sell': shares_to_sell,
+                                'quantity': shares_to_sell,  # Also include as 'quantity' for consistency
                                 'order_id': order_id,
                                 'order_status': 'FILLED',
                                 'line_id': exit_line['id'],
-                                'strategy': 'uptrend_spot_limit',
+                                'strategy': strategy_name,
                                 'note': 'filled_immediately_on_submit'
                             })
 
                             # Log partial exit event (for position tracking)
-                            await self._log_bot_event(bot_id, 'spot_position_partial_exit', {
+                            partial_event_type = 'options_position_partial_exit' if trend_strategy == 'downtrend' else 'spot_position_partial_exit'
+                            await self._log_bot_event(bot_id, partial_event_type, {
                                 'line_id': exit_line['id'],
-                                'line_price': exit_line_price_rounded,
+                                'line_price': log_price,
                                 'shares_sold': shares_to_sell,
+                                'quantity': shares_to_sell,  # Also include as 'quantity' for consistency
                                 'remaining_shares': bot_state['open_shares'],
                                 'total_exited': bot_state['shares_exited'],
                                 'order_id': order_id,
-                                'strategy': 'uptrend_spot_limit',
+                                'strategy': strategy_name,
                                 'note': 'filled_immediately_on_submit'
                             })
 
@@ -1233,10 +1515,13 @@ class BotService:
 
                         # Order is pending - store it and log event
                         exit_order_key = f"exit_order_{exit_line['id']}"
+                        # For market orders (options), price is None since market orders don't have prices
+                        # For limit orders (stocks), store the rounded price
+                        order_price = None if trend_strategy == 'downtrend' else exit_line_price_rounded
                         bot_state[exit_order_key] = {
                             'order_id': order_id,
                             'status': normalized_status,
-                            'price': exit_line_price_rounded,  # Store rounded price (actual order price)
+                            'price': order_price,  # None for market orders, rounded price for limit orders
                             'quantity': shares_to_sell,
                             'last_update': time.time(),
                             'line_id': exit_line['id']
@@ -1248,14 +1533,19 @@ class BotService:
                         })
                         
                         # Log exit order event with the same event type as _submit_exit_order
-                        await self._log_bot_event(bot_id, 'spot_exit_limit_order', {
-                            'line_price': exit_line_price_rounded,  # Use rounded price (actual order price)
+                        event_type = 'options_exit_limit_order' if trend_strategy == 'downtrend' else 'spot_exit_limit_order'
+                        strategy_name = 'downtrend_options' if trend_strategy == 'downtrend' else 'uptrend_spot_limit'
+                        # For options, use stock price from trend line for logging (even though order is market)
+                        log_price = exit_line_price_rounded if trend_strategy != 'downtrend' else exit_line_price
+                        await self._log_bot_event(bot_id, event_type, {
+                            'line_price': log_price,  # Stock price from trend line (for logging)
                             'current_price': current_price,
-                            'shares_to_sell': shares_to_sell,
+                            'shares_to_sell': shares_to_sell,  # This should be the quantity
+                            'quantity': shares_to_sell,  # Also include as 'quantity' for consistency
                             'order_id': order_id,
                             'order_status': normalized_status,
                             'line_id': exit_line['id'],
-                            'strategy': 'uptrend_spot_limit'
+                            'strategy': strategy_name
                         })
                         
                         orders_created += 1
@@ -1361,33 +1651,62 @@ class BotService:
             # Convert entry_price to float
             entry_price = float(entry_price)
             
+            # Get trend strategy to determine stop-out direction
+            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
+            
             # Get soft stop and hard stop percentages
             soft_stop_pct = bot_state.get('soft_stop_pct', 5.0)
             hard_stop_pct = bot_state.get('hard_stop_pct', 5.0)
             soft_stop_minutes = bot_state.get('soft_stop_minutes', 5)
             
-            # Calculate stop prices
-            soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
-            hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
+            # Calculate stop prices - reverse for downtrend (options)
+            if trend_strategy == 'downtrend':
+                # For options: stop prices are ABOVE entry (price rises = loss for puts)
+                soft_stop_price = entry_price * (1 + soft_stop_pct / 100)
+                hard_stop_price = entry_price * (1 + hard_stop_pct / 100)
+            else:
+                # For stocks: stop prices are BELOW entry (price drops = loss)
+                soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
+                hard_stop_price = entry_price * (1 - hard_stop_pct / 100)
             
-            # Check if price goes below hard stop - this takes priority
-            if current_price <= hard_stop_price:
+            # Check if price triggers hard stop - this takes priority
+            if trend_strategy == 'downtrend':
+                # Options: trigger when price rises above hard stop
+                hard_stop_triggered = current_price >= hard_stop_price
+            else:
+                # Stocks: trigger when price drops below hard stop
+                hard_stop_triggered = current_price <= hard_stop_price
+            
+            if hard_stop_triggered:
                 # Hard stop takes priority - reset soft stop timer (hard stop handler will sell)
                 bot_state['soft_stop_timer_start'] = None
                 bot_state['soft_stop_timer_active'] = False
                 return
             
-            # Check if price is below soft stop
-            if current_price <= soft_stop_price:
-                # Price is below soft stop - start or continue timer
+            # Check if price triggers soft stop
+            if trend_strategy == 'downtrend':
+                # Options: trigger when price rises above soft stop
+                soft_stop_triggered = current_price >= soft_stop_price
+            else:
+                # Stocks: trigger when price drops below soft stop
+                soft_stop_triggered = current_price <= soft_stop_price
+            
+            if soft_stop_triggered:
+                # Price triggers soft stop - start or continue timer
                 if not bot_state['soft_stop_timer_active']:
                     # Start the timer
                     bot_state['soft_stop_timer_start'] = time.time()
                     bot_state['soft_stop_timer_active'] = True
-                    logger.info(f"⏱️ Bot {bot_id}: SOFT STOP TIMER STARTED - "
-                              f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}, "
-                              f"Soft stop: ${soft_stop_price:.2f} ({soft_stop_pct}%), "
-                              f"Timer: {soft_stop_minutes} minutes")
+                    if trend_strategy == 'downtrend':
+                        logger.info(f"⏱️ Bot {bot_id}: SOFT STOP TIMER STARTED - "
+                                  f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}, "
+                                  f"Soft stop: ${soft_stop_price:.2f} ({soft_stop_pct}% ABOVE entry), "
+                                  f"Timer: {soft_stop_minutes} minutes")
+                    else:
+                        logger.info(f"⏱️ Bot {bot_id}: SOFT STOP TIMER STARTED - "
+                                  f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}, "
+                                  f"Soft stop: ${soft_stop_price:.2f} ({soft_stop_pct}% BELOW entry), "
+                                  f"Timer: {soft_stop_minutes} minutes")
                 
                 # Check if timer has expired
                 if bot_state['soft_stop_timer_active'] and bot_state['soft_stop_timer_start']:
@@ -1395,17 +1714,26 @@ class BotService:
                     
                     if elapsed_minutes >= soft_stop_minutes:
                         # Timer expired - sell position
-                        logger.warning(f"⏱️ Bot {bot_id}: SOFT STOP TIMER EXPIRED! "
-                                     f"Price stayed below soft stop for {elapsed_minutes:.1f} minutes. "
-                                     f"Selling position...")
+                        if trend_strategy == 'downtrend':
+                            logger.warning(f"⏱️ Bot {bot_id}: SOFT STOP TIMER EXPIRED! "
+                                         f"Price stayed above soft stop for {elapsed_minutes:.1f} minutes. "
+                                         f"Selling position...")
+                        else:
+                            logger.warning(f"⏱️ Bot {bot_id}: SOFT STOP TIMER EXPIRED! "
+                                         f"Price stayed below soft stop for {elapsed_minutes:.1f} minutes. "
+                                         f"Selling position...")
                         
                         # Execute soft stop sell
                         await self._execute_soft_stop_sell(bot_id, current_price)
             else:
-                # Price is above soft stop - reset timer
+                # Price recovered - reset timer
                 if bot_state['soft_stop_timer_active']:
-                    logger.info(f"⏱️ Bot {bot_id}: SOFT STOP TIMER RESET - "
-                              f"Price recovered above soft stop: ${current_price:.2f} > ${soft_stop_price:.2f}")
+                    if trend_strategy == 'downtrend':
+                        logger.info(f"⏱️ Bot {bot_id}: SOFT STOP TIMER RESET - "
+                                  f"Price recovered below soft stop: ${current_price:.2f} < ${soft_stop_price:.2f}")
+                    else:
+                        logger.info(f"⏱️ Bot {bot_id}: SOFT STOP TIMER RESET - "
+                                  f"Price recovered above soft stop: ${current_price:.2f} > ${soft_stop_price:.2f}")
                     bot_state['soft_stop_timer_start'] = None
                     bot_state['soft_stop_timer_active'] = False
                     
@@ -1421,17 +1749,54 @@ class BotService:
             if shares_to_sell <= 0:
                 return
                 
-            logger.warning(f"⏱️ Bot {bot_id}: Executing SOFT STOP SELL of {shares_to_sell} shares at ${current_price:.2f}")
+            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
+            contract_type = "contracts" if trend_strategy == 'downtrend' else "shares"
+            logger.warning(f"⏱️ Bot {bot_id}: Executing SOFT STOP SELL of {shares_to_sell} {contract_type} at ${current_price:.2f}")
             
             # Place market sell order
             from app.utils.ib_client import ib_client
             from ib_async import MarketOrder
             
-            # Get contract
-            contract = await ib_client.qualify_stock(bot_state['symbol'])
-            if not contract:
-                logger.error(f"❌ Bot {bot_id}: Could not get contract for {bot_state['symbol']}")
-                return
+            # Get contract - use option contract for downtrend, stock for uptrend
+            if trend_strategy == 'downtrend':
+                # Use option contract
+                contract = bot_state.get('option_contract')
+                if not contract:
+                    # Try to reconstruct the contract from stored option details
+                    option_strike = bot_state.get('option_strike')
+                    option_expiry = bot_state.get('option_expiry')
+                    option_right = bot_state.get('option_right', 'P')
+                    symbol = bot_state.get('symbol')
+                    
+                    if option_strike and option_expiry and symbol:
+                        from ib_async import Option
+                        contract = Option(
+                            symbol=symbol,
+                            lastTradeDateOrContractMonth=str(option_expiry),
+                            strike=float(option_strike),
+                            right=option_right,
+                            exchange='SMART'
+                        )
+                        # Qualify the contract
+                        try:
+                            details_list = await ib_client.ib.reqContractDetailsAsync(contract)
+                            if details_list and len(details_list) > 0:
+                                contract = details_list[0].contract
+                            else:
+                                logger.error(f"❌ Bot {bot_id}: Could not qualify option contract for soft stop")
+                                return
+                        except Exception as e:
+                            logger.error(f"❌ Bot {bot_id}: Error qualifying option contract: {e}")
+                            return
+                    else:
+                        logger.error(f"❌ Bot {bot_id}: No option contract found for soft stop")
+                        return
+            else:
+                # Use stock contract
+                contract = await ib_client.qualify_stock(bot_state['symbol'])
+                if not contract:
+                    logger.error(f"❌ Bot {bot_id}: Could not get contract for {bot_state['symbol']}")
+                    return
             
             # Place market sell order
             order = MarketOrder("SELL", shares_to_sell)
@@ -1501,14 +1866,34 @@ class BotService:
             # Convert entry_price to float to avoid Decimal type errors
             entry_price = float(entry_price)
             
-            # Calculate stop-out price (entry price - stop-out percentage)
-            stop_out_price = entry_price * (1 - hard_stop_pct / 100)
+            # Get trend strategy to determine stop-out direction
+            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
             
-            # Check if current price has dropped below stop-out price
-            if current_price <= stop_out_price:
-                logger.warning(f"🚨 Bot {bot_id}: HARD STOP-OUT TRIGGERED! "
-                              f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}, "
-                              f"Stop-out: ${stop_out_price:.2f} ({hard_stop_pct}%)")
+            # Calculate stop-out price - reverse for downtrend (options)
+            if trend_strategy == 'downtrend':
+                # For options: stop price is ABOVE entry (price rises = loss for puts)
+                stop_out_price = entry_price * (1 + hard_stop_pct / 100)
+            else:
+                # For stocks: stop price is BELOW entry (price drops = loss)
+                stop_out_price = entry_price * (1 - hard_stop_pct / 100)
+            
+            # Check if current price triggers stop-out
+            if trend_strategy == 'downtrend':
+                # Options: trigger when price rises above stop-out
+                stop_triggered = current_price >= stop_out_price
+            else:
+                # Stocks: trigger when price drops below stop-out
+                stop_triggered = current_price <= stop_out_price
+            
+            if stop_triggered:
+                if trend_strategy == 'downtrend':
+                    logger.warning(f"🚨 Bot {bot_id}: HARD STOP-OUT TRIGGERED! "
+                                  f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}, "
+                                  f"Stop-out: ${stop_out_price:.2f} ({hard_stop_pct}% ABOVE entry)")
+                else:
+                    logger.warning(f"🚨 Bot {bot_id}: HARD STOP-OUT TRIGGERED! "
+                                  f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}, "
+                                  f"Stop-out: ${stop_out_price:.2f} ({hard_stop_pct}% BELOW entry)")
                 
                 # Reset soft stop timer (hard stop takes priority)
                 bot_state['soft_stop_timer_start'] = None
@@ -1529,21 +1914,58 @@ class BotService:
             if shares_to_sell <= 0:
                 return
                 
-            logger.warning(f"🚨 Bot {bot_id}: Executing HARD STOP-OUT SELL of {shares_to_sell} shares at ${current_price:.2f}")
+            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
+            contract_type = "contracts" if trend_strategy == 'downtrend' else "shares"
+            logger.warning(f"🚨 Bot {bot_id}: Executing HARD STOP-OUT SELL of {shares_to_sell} {contract_type} at ${current_price:.2f}")
             
             # Place market sell order
             from app.utils.ib_client import ib_client
             from ib_async import MarketOrder
             
-            # Get contract
-            contract = await ib_client.get_contract(bot_state['symbol'])
-            if not contract:
-                logger.error(f"❌ Bot {bot_id}: Could not get contract for {bot_state['symbol']}")
-                return
+            # Get contract - use option contract for downtrend, stock for uptrend
+            if trend_strategy == 'downtrend':
+                # Use option contract
+                contract = bot_state.get('option_contract')
+                if not contract:
+                    # Try to reconstruct the contract from stored option details
+                    option_strike = bot_state.get('option_strike')
+                    option_expiry = bot_state.get('option_expiry')
+                    option_right = bot_state.get('option_right', 'P')
+                    symbol = bot_state.get('symbol')
+                    
+                    if option_strike and option_expiry and symbol:
+                        from ib_async import Option
+                        contract = Option(
+                            symbol=symbol,
+                            lastTradeDateOrContractMonth=str(option_expiry),
+                            strike=float(option_strike),
+                            right=option_right,
+                            exchange='SMART'
+                        )
+                        # Qualify the contract
+                        try:
+                            details_list = await ib_client.ib.reqContractDetailsAsync(contract)
+                            if details_list and len(details_list) > 0:
+                                contract = details_list[0].contract
+                            else:
+                                logger.error(f"❌ Bot {bot_id}: Could not qualify option contract for hard stop")
+                                return
+                        except Exception as e:
+                            logger.error(f"❌ Bot {bot_id}: Error qualifying option contract: {e}")
+                            return
+                    else:
+                        logger.error(f"❌ Bot {bot_id}: No option contract found for hard stop")
+                        return
+            else:
+                # Use stock contract
+                contract = await ib_client.get_contract(bot_state['symbol'])
+                if not contract:
+                    logger.error(f"❌ Bot {bot_id}: Could not get contract for {bot_state['symbol']}")
+                    return
                 
             # Place market sell order
             order = MarketOrder("SELL", shares_to_sell)
-            trade = ib_client.ib.placeOrder(contract, order)
+            trade = await ib_client.place_order(contract, order)
             
             if trade:
                 logger.warning(f"🚨 Bot {bot_id}: HARD STOP-OUT ORDER PLACED - Order ID: {trade.order.orderId}")
@@ -1635,8 +2057,47 @@ class BotService:
             
             logger.info(f"🤖 Bot {bot_id}: Single-buy mode - Buying {shares_to_buy} shares (trade_amount={trade_amount}) at price ${current_price:.2f}")
             
+            # Check if we have sufficient cash for this purchase (cash purchase, not margin)
+            estimated_cost = shares_to_buy * current_price
+            has_cash, available_cash = await ib_client.check_sufficient_cash(estimated_cost)
+            
+            if has_cash:
+                logger.info(f"✅ Bot {bot_id}: Sufficient cash available (${available_cash:.2f}) for purchase (${estimated_cost:.2f})")
+            elif available_cash is not None:
+                logger.warning(f"⚠️ Bot {bot_id}: Insufficient cash - Available: ${available_cash:.2f}, Required: ${estimated_cost:.2f}")
+                logger.warning(f"   This is a cash purchase, but account may be treated as margin account")
+            
             order = MarketOrder("BUY", shares_to_buy)
-            trade = await ib_client.place_order(contract, order)
+            
+            try:
+                trade = await ib_client.place_order(contract, order)
+            except Exception as e:
+                error_msg = str(e)
+                # Check for IBKR minimum equity requirement error
+                if "2500" in error_msg or "MINIMUM" in error_msg.upper() or "201" in error_msg:
+                    # Get account info once (this call includes equity, cash, and account type)
+                    account_info = await ib_client.get_account_type_info()
+                    account_equity = account_info.get('equity')
+                    account_cash = account_info.get('cash')
+                    account_type = account_info.get('account_type', 'UNKNOWN')
+                    
+                    logger.error(f"❌ Bot {bot_id}: Order rejected - IBKR minimum equity requirement not met")
+                    logger.error(f"   Account Type: {account_type}")
+                    if account_equity:
+                        logger.error(f"   Account Equity: ${account_equity:.2f} (minimum required: $2500 CAD)")
+                    if account_cash:
+                        logger.error(f"   Available Cash: ${account_cash:.2f} (purchase cost: ${estimated_cost:.2f})")
+                    logger.error(f"   ⚠️  This is a CASH purchase (not margin/short/futures), but IBKR margin accounts")
+                    logger.error(f"      require minimum $2500 equity even for cash purchases.")
+                    logger.error(f"   Solutions:")
+                    logger.error(f"   1. ✅ Deposit funds to reach $2500 minimum equity (recommended)")
+                    logger.error(f"   2. ✅ Switch account type to CASH account (no minimum requirement)")
+                    logger.error(f"      → In TWS: Account Management → Account Settings → Change Account Type")
+                    logger.error(f"   3. ✅ Use paper trading account (port 7497) for testing")
+                    raise
+                else:
+                    # Re-raise other errors
+                    raise
             
             if trade:
                 logger.info(f"✅ Bot {bot_id}: MARKET BUY ORDER PLACED - Order ID: {trade.order.orderId}")
@@ -1703,42 +2164,69 @@ class BotService:
                 logger.error(f"Could not find put option for {bot_state['symbol']}")
                 return
                 
-            # Create options contract
-            from ib_async import Option
-            contract = Option(
-                symbol=bot_state['symbol'],
-                lastTradeDateOrContractMonth=option_info['expiry'],
-                strike=option_info['strike'],
-                right='P',  # Put option
-                exchange='SMART'
+            # Try to qualify the contract, and if it fails, try alternative expirations/strikes
+            qualified_contract = await self._qualify_option_contract(
+                bot_state['symbol'], 
+                option_info['strike'], 
+                option_info['expiry'],
+                current_price
             )
             
-            # Qualify the contract
-            qualified_contracts = await ib_client.qualify_contracts(contract)
-            if not qualified_contracts:
-                logger.error(f"Could not qualify put option contract")
+            if not qualified_contract:
+                logger.error(f"❌ Could not qualify put option contract for {bot_state['symbol']} after trying alternatives")
                 return
                 
-            contract = qualified_contracts[0]
+            contract = qualified_contract
             
-            # Calculate number of contracts (options are typically 100 shares per contract)
-            contracts_to_buy = max(1, bot_state['position_size'] // 100)
+            # Calculate number of contracts based on trade_amount
+            # For options, trade_amount is the number of contracts to buy
+            trade_amount = bot_state.get('trade_amount', bot_state.get('position_size', 100))
+            contracts_to_buy = max(1, int(trade_amount))
+            logger.info(f"🤖 Bot {bot_id}: Buying {contracts_to_buy} PUT option contracts (trade_amount={trade_amount})")
             
             # Place market buy order for put options
+            from ib_async import MarketOrder
             order = MarketOrder("BUY", contracts_to_buy)
-            trade = await ib_client.place_order(contract, order)
             
-            # Update bot state
+            try:
+                trade = await ib_client.place_order(contract, order)
+            except Exception as e:
+                error_msg = str(e)
+                # Check for IBKR minimum equity requirement error
+                if "2500" in error_msg or "MINIMUM" in error_msg.upper() or "201" in error_msg:
+                    account_equity = await ib_client.get_account_equity()
+                    if account_equity:
+                        logger.error(f"❌ Bot {bot_id}: Options entry order rejected - Account equity (${account_equity:.2f}) is below IBKR minimum requirement of $2500 CAD (or equivalent)")
+                        logger.error(f"   Please deposit funds to reach minimum equity requirement, or switch to a cash account")
+                    else:
+                        logger.error(f"❌ Bot {bot_id}: Options entry order rejected - IBKR requires minimum equity of $2500 CAD (or equivalent) for margin accounts")
+                        logger.error(f"   Error: {error_msg}")
+                    raise
+                else:
+                    # Re-raise other errors
+                    raise
+            
+            if not trade:
+                logger.error(f"❌ Bot {bot_id}: Failed to place options entry order - no trade returned")
+                return
+            
+            if not trade.order:
+                logger.error(f"❌ Bot {bot_id}: Failed to place options entry order - trade has no order")
+                return
+            
+            logger.info(f"✅ Bot {bot_id}: Options entry order placed - Order ID: {trade.order.orderId}, Contracts: {contracts_to_buy}")
+            
+            # Update bot state only after successful order placement
             bot_state['is_bought'] = True
             bot_state['entry_price'] = current_price
-            bot_state['shares_entered'] += contracts_to_buy
-            bot_state['total_position'] += contracts_to_buy
-            bot_state['open_shares'] += contracts_to_buy
+            bot_state['shares_entered'] = contracts_to_buy  # Set to contracts bought (not +=)
+            bot_state['total_position'] = contracts_to_buy
+            bot_state['open_shares'] = contracts_to_buy
             
-            # Store option details
+            # Store option details (use actual qualified contract values, which may differ from option_info if alternatives were used)
             bot_state['option_contract'] = contract
-            bot_state['option_strike'] = option_info['strike']
-            bot_state['option_expiry'] = option_info['expiry']
+            bot_state['option_strike'] = contract.strike
+            bot_state['option_expiry'] = contract.lastTradeDateOrContractMonth
             bot_state['option_right'] = 'P'
             
             # Update database
@@ -1755,8 +2243,8 @@ class BotService:
                 'line_price': line['price'],
                 'current_price': current_price,
                 'contracts': contracts_to_buy,
-                'strike': option_info['strike'],
-                'expiry': option_info['expiry'],
+                'strike': contract.strike,  # Use actual qualified contract strike
+                'expiry': contract.lastTradeDateOrContractMonth,  # Use actual qualified contract expiry
                 'order_id': trade.order.orderId if trade.order else None,
                 'strategy': 'downtrend_options'
             })
@@ -1764,32 +2252,309 @@ class BotService:
             logger.info(f"🤖 Bot {bot_id} opened OPTIONS position: {contracts_to_buy} PUT contracts at ${current_price}")
             
         except Exception as e:
-            logger.error(f"Error executing options entry trade for bot {bot_id}: {e}")
+            logger.error(f"❌ Error executing options entry trade for bot {bot_id}: {e}", exc_info=True)
+            # Ensure we don't accidentally buy stock in downtrend mode
+            logger.error(f"❌ Bot {bot_id}: Options entry failed - NOT falling back to stock purchase (downtrend mode)")
             
     async def _find_put_option(self, symbol: str, current_price: float) -> dict:
-        """Find appropriate put option for downtrend strategy"""
+        """Find appropriate put option for downtrend strategy using option chain"""
         try:
-            # For now, use a simple strategy:
-            # Find a put option that's 5% out of the money with 30-45 DTE
-            target_strike = current_price * 0.95  # 5% OTM
+            logger.info(f"🔍 Searching for PUT option for {symbol} at current price ${current_price:.2f}")
             
-            # Get current date and add 30-45 days for expiry
+            # Get option chain to find available strikes and expirations
+            logger.info(f"📊 Requesting option chain for {symbol}...")
+            option_chain = await ib_client.get_option_chain(symbol)
+            if not option_chain:
+                logger.error(f"❌ Could not get option chain for {symbol}")
+                return None
+            
+            expiration_dates = option_chain.get('expiration_dates', [])
+            strikes = option_chain.get('strikes', [])
+            
+            logger.info(f"📈 Option chain received for {symbol}: {len(expiration_dates)} expiration dates, {len(strikes)} strikes")
+            logger.info(f"📅 Sample expiration dates (first 5): {expiration_dates[:5]}")
+            logger.info(f"💰 Sample strikes (first 10): {strikes[:10]}")
+            logger.info(f"💰 Strike range: ${min(strikes):.2f} - ${max(strikes):.2f}")
+            
+            if not expiration_dates or not strikes:
+                logger.error(f"❌ No expiration dates or strikes found for {symbol}")
+                return None
+            
+            # Find a put option that's 5-10% out of the money with 30-45 DTE
+            target_strike_low = current_price * 0.90  # 10% OTM
+            target_strike_high = current_price * 0.95  # 5% OTM
+            
+            logger.info(f"🎯 Target strike range: ${target_strike_low:.2f} - ${target_strike_high:.2f} (5-10% OTM)")
+            
+            # Find strikes within our target range
+            available_strikes = [s for s in strikes if target_strike_low <= s <= target_strike_high]
+            logger.info(f"🔍 Found {len(available_strikes)} strikes in target range: {available_strikes[:10]}")
+            
+            if not available_strikes:
+                # If no strikes in range, find the closest strike below current price
+                logger.info(f"⚠️ No strikes in target range, searching for strikes below current price...")
+                available_strikes = [s for s in strikes if s < current_price]
+                logger.info(f"🔍 Found {len(available_strikes)} strikes below current price: {available_strikes[:10]}")
+                if not available_strikes:
+                    logger.error(f"❌ No suitable put strikes found for {symbol} (current price: ${current_price:.2f})")
+                    return None
+            
+            # Use the highest strike in our range (closest to current price but still OTM)
+            strike = max(available_strikes)
+            logger.info(f"✅ Selected strike: ${strike:.2f} (from {len(available_strikes)} available strikes)")
+            
+            # Find expiration date around 30-45 days out
+            # Use expiration dates directly from option chain (already in correct format)
             from datetime import datetime, timedelta
-            target_expiry = datetime.now() + timedelta(days=35)
-            expiry_str = target_expiry.strftime("%Y%m%d")
+            target_date = datetime.now() + timedelta(days=35)
+            logger.info(f"📅 Target expiration: ~35 days out ({target_date.strftime('%Y-%m-%d')})")
             
-            # Round strike to nearest $5 increment
-            strike = round(target_strike / 5) * 5
+            # Find the closest expiration date to our target
+            best_expiry = None
+            min_diff = float('inf')
+            valid_expirations = []
+            
+            logger.info(f"🔍 Processing {len(expiration_dates)} expiration dates...")
+            for exp_date in expiration_dates:
+                # Use expiration date directly if it's already a string in YYYYMMDD format
+                exp_str = None
+                exp_dt = None
+                
+                if isinstance(exp_date, str):
+                    # Already in string format, use directly
+                    exp_str = exp_date
+                    try:
+                        exp_dt = datetime.strptime(exp_date, "%Y%m%d")
+                    except:
+                        logger.debug(f"⚠️ Could not parse expiration date string: {exp_date}")
+                        continue
+                elif hasattr(exp_date, 'timestamp'):
+                    exp_dt = datetime.fromtimestamp(exp_date.timestamp())
+                    exp_str = exp_dt.strftime("%Y%m%d")
+                elif hasattr(exp_date, 'strftime'):
+                    exp_dt = exp_date
+                    exp_str = exp_dt.strftime("%Y%m%d")
+                else:
+                    logger.debug(f"⚠️ Unknown expiration date format: {exp_date} (type: {type(exp_date)})")
+                    continue
+                
+                # Check if expiration is in the future and within reasonable range (20-60 days)
+                days_diff = (exp_dt - datetime.now()).days
+                if 20 <= days_diff <= 60:
+                    valid_expirations.append((exp_str, days_diff))
+                    diff = abs((exp_dt - target_date).days)
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_expiry = exp_str  # Use the string directly from option chain
+                        logger.debug(f"✅ Found candidate expiration: {best_expiry} ({days_diff} days out, diff: {diff} days)")
+            
+            logger.info(f"📅 Found {len(valid_expirations)} valid expirations (20-60 days out)")
+            if valid_expirations:
+                logger.info(f"📅 Valid expirations: {valid_expirations[:5]}")
+            
+            if not best_expiry:
+                # Fallback: use the first expiration that's at least 20 days out
+                logger.info(f"⚠️ No expiration in ideal range, trying fallback (>=20 days)...")
+                for exp_date in expiration_dates:
+                    exp_str = None
+                    exp_dt = None
+                    
+                    if isinstance(exp_date, str):
+                        exp_str = exp_date
+                        try:
+                            exp_dt = datetime.strptime(exp_date, "%Y%m%d")
+                        except:
+                            continue
+                    elif hasattr(exp_date, 'timestamp'):
+                        exp_dt = datetime.fromtimestamp(exp_date.timestamp())
+                        exp_str = exp_dt.strftime("%Y%m%d")
+                    elif hasattr(exp_date, 'strftime'):
+                        exp_dt = exp_date
+                        exp_str = exp_dt.strftime("%Y%m%d")
+                    else:
+                        continue
+                    
+                    days_diff = (exp_dt - datetime.now()).days
+                    if days_diff >= 20:
+                        best_expiry = exp_str  # Use the string directly
+                        logger.info(f"✅ Using fallback expiration: {best_expiry} ({days_diff} days out)")
+                        break
+            
+            if not best_expiry:
+                logger.error(f"❌ No suitable expiration date found for {symbol}")
+                logger.error(f"❌ Available expiration dates: {expiration_dates[:10]}")
+                return None
+            
+            # Verify the expiration exists in the option chain (use exact match from chain)
+            expiration_str_list = [str(ed) for ed in expiration_dates]
+            if best_expiry not in expiration_str_list:
+                logger.warning(f"⚠️ Selected expiration {best_expiry} not found in option chain, finding closest match...")
+                # Find the closest match from the actual option chain
+                best_match = None
+                best_match_diff = float('inf')
+                target_dt = datetime.strptime(best_expiry, "%Y%m%d")
+                
+                for exp_date in expiration_dates:
+                    exp_str = str(exp_date)
+                    try:
+                        exp_dt = datetime.strptime(exp_str, "%Y%m%d")
+                        diff = abs((exp_dt - target_dt).days)
+                        if diff < best_match_diff:
+                            best_match_diff = diff
+                            best_match = exp_str
+                    except:
+                        continue
+                
+                if best_match:
+                    best_expiry = best_match
+                    logger.info(f"✅ Using closest match from option chain: {best_expiry}")
+                else:
+                    logger.error(f"❌ Could not find matching expiration in option chain")
+                    return None
+            
+            # Final verification: ensure expiration is in the chain
+            if best_expiry not in expiration_str_list:
+                logger.error(f"❌ Selected expiration {best_expiry} is not in option chain!")
+                logger.error(f"❌ Available expirations: {expiration_str_list[:10]}")
+                return None
+            
+            logger.info(f"✅ Found put option for {symbol}: Strike=${strike:.2f}, Expiry={best_expiry}, Current Price=${current_price:.2f}")
+            logger.info(f"✅ Verified expiration {best_expiry} exists in option chain")
             
             return {
                 'strike': strike,
-                'expiry': expiry_str,
+                'expiry': best_expiry,
                 'right': 'P'
             }
             
         except Exception as e:
-            logger.error(f"Error finding put option: {e}")
+            logger.error(f"Error finding put option: {e}", exc_info=True)
             return None
+    
+    async def _qualify_option_contract(self, symbol: str, strike: float, expiry: str, current_price: float):
+        """
+        Qualify an option contract, trying alternative expirations/strikes if the initial one fails.
+        Returns the qualified contract or None if all attempts fail.
+        """
+        from ib_async import Option
+        
+        # First, try the requested strike and expiration
+        contract = Option(
+            symbol=symbol,
+            lastTradeDateOrContractMonth=expiry,
+            strike=strike,
+            right='P',
+            exchange='SMART'
+        )
+        
+        logger.info(f"🔍 Attempting to qualify PUT option contract:")
+        logger.info(f"   Symbol: {contract.symbol}")
+        logger.info(f"   Strike: ${contract.strike}")
+        logger.info(f"   Right: {contract.right}")
+        logger.info(f"   Expiry: {contract.lastTradeDateOrContractMonth}")
+        logger.info(f"   Exchange: {contract.exchange}")
+        
+        await ib_client.ensure_connected()
+        logger.info(f"📡 Requesting contract details from IBKR...")
+        
+        try:
+            details_list = await ib_client.ib.reqContractDetailsAsync(contract)
+            if details_list and len(details_list) > 0:
+                qualified_contract = details_list[0].contract
+                logger.info(f"✅ Successfully qualified put option contract:")
+                logger.info(f"   Contract ID: {qualified_contract.conId}")
+                logger.info(f"   Symbol: {qualified_contract.symbol}")
+                logger.info(f"   Strike: ${qualified_contract.strike}")
+                logger.info(f"   Right: {qualified_contract.right}")
+                logger.info(f"   Expiry: {qualified_contract.lastTradeDateOrContractMonth}")
+                return qualified_contract
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to qualify contract with strike ${strike:.2f} and expiry {expiry}: {e}")
+        
+        # If initial qualification failed, try alternative expirations
+        logger.info(f"🔄 Trying alternative expirations for strike ${strike:.2f}...")
+        option_chain = await ib_client.get_option_chain(symbol)
+        if option_chain:
+            expiration_dates = option_chain.get('expiration_dates', [])
+            from datetime import datetime, timedelta
+            
+            # Try expirations in order: closest to target, then others
+            target_date = datetime.now() + timedelta(days=35)
+            expirations_to_try = []
+            
+            for exp_date in expiration_dates:
+                exp_str = str(exp_date)
+                try:
+                    exp_dt = datetime.strptime(exp_str, "%Y%m%d")
+                    days_diff = (exp_dt - datetime.now()).days
+                    if 20 <= days_diff <= 60:
+                        expirations_to_try.append((exp_str, abs((exp_dt - target_date).days)))
+                except:
+                    continue
+            
+            # Sort by distance from target
+            expirations_to_try.sort(key=lambda x: x[1])
+            
+            for exp_str, _ in expirations_to_try:
+                if exp_str == expiry:
+                    continue  # Already tried this one
+                
+                contract = Option(
+                    symbol=symbol,
+                    lastTradeDateOrContractMonth=exp_str,
+                    strike=strike,
+                    right='P',
+                    exchange='SMART'
+                )
+                
+                logger.info(f"🔄 Trying alternative expiration: {exp_str}")
+                try:
+                    details_list = await ib_client.ib.reqContractDetailsAsync(contract)
+                    if details_list and len(details_list) > 0:
+                        qualified_contract = details_list[0].contract
+                        logger.info(f"✅ Successfully qualified with alternative expiration {exp_str}")
+                        return qualified_contract
+                except Exception as e:
+                    logger.debug(f"⚠️ Failed with expiration {exp_str}: {e}")
+                    continue
+        
+        # If still no luck, try adjusting strike (round to nearest $5 or $2.50 increment)
+        logger.info(f"🔄 Trying alternative strikes near ${strike:.2f}...")
+        strikes_to_try = [
+            round(strike / 5) * 5,  # Round to nearest $5
+            round(strike / 2.5) * 2.5,  # Round to nearest $2.50
+            strike - 2.5,
+            strike + 2.5,
+            strike - 5,
+            strike + 5
+        ]
+        
+        for alt_strike in strikes_to_try:
+            if alt_strike == strike or alt_strike <= 0:
+                continue
+            
+            contract = Option(
+                symbol=symbol,
+                lastTradeDateOrContractMonth=expiry,
+                strike=alt_strike,
+                right='P',
+                exchange='SMART'
+            )
+            
+            logger.info(f"🔄 Trying alternative strike: ${alt_strike:.2f}")
+            try:
+                details_list = await ib_client.ib.reqContractDetailsAsync(contract)
+                if details_list and len(details_list) > 0:
+                    qualified_contract = details_list[0].contract
+                    logger.info(f"✅ Successfully qualified with alternative strike ${alt_strike:.2f}")
+                    return qualified_contract
+            except Exception as e:
+                logger.debug(f"⚠️ Failed with strike ${alt_strike:.2f}: {e}")
+                continue
+        
+        logger.error(f"❌ Could not qualify put option contract for {symbol}")
+        logger.error(f"❌ Tried strike ${strike:.2f} with expiry {expiry} and alternatives")
+        return None
             
     async def _execute_exit_trade(self, bot_id: int, line, current_price: float):
         """Execute exit trade based on trend strategy"""
@@ -1892,54 +2657,147 @@ class BotService:
             logger.error(f"Error executing spot exit trade for bot {bot_id}: {e}")
             
     async def _execute_options_exit_trade(self, bot_id: int, line, current_price: float):
-        """Execute options exit trade (downtrend strategy)"""
+        """Execute options exit trade (downtrend strategy) - split position across exit lines"""
         try:
             bot_state = self.active_bots[bot_id]
             
             if bot_state['open_shares'] <= 0:
+                logger.warning(f"⚠️ Bot {bot_id}: Cannot exit - no open contracts (open_shares={bot_state['open_shares']})")
                 return
                 
-            # Use the stored option contract
+            # Use the stored option contract, or reconstruct it from stored details
             contract = bot_state.get('option_contract')
             if not contract:
-                logger.error(f"No option contract found for bot {bot_id}")
+                # Try to reconstruct the contract from stored option details
+                option_strike = bot_state.get('option_strike')
+                option_expiry = bot_state.get('option_expiry')
+                option_right = bot_state.get('option_right', 'P')
+                symbol = bot_state.get('symbol')
+                
+                if option_strike and option_expiry and symbol:
+                    logger.info(f"🔄 Bot {bot_id}: Reconstructing option contract from stored details: {symbol} {option_expiry} {option_strike} {option_right}")
+                    from ib_async import Option
+                    contract = Option(
+                        symbol=symbol,
+                        lastTradeDateOrContractMonth=str(option_expiry),
+                        strike=float(option_strike),
+                        right=option_right,
+                        exchange='SMART'
+                    )
+                    
+                    # Qualify the contract to ensure it's valid
+                    try:
+                        details_list = await ib_client.ib.reqContractDetailsAsync(contract)
+                        if details_list and len(details_list) > 0:
+                            contract = details_list[0].contract
+                            logger.info(f"✅ Bot {bot_id}: Successfully reconstructed and qualified option contract")
+                            # Store the qualified contract back in bot_state
+                            bot_state['option_contract'] = contract
+                        else:
+                            logger.error(f"❌ Bot {bot_id}: Could not qualify reconstructed option contract")
+                            return
+                    except Exception as e:
+                        logger.error(f"❌ Bot {bot_id}: Error qualifying reconstructed option contract: {e}")
+                        return
+                else:
+                    logger.error(f"❌ Bot {bot_id}: No option contract found and missing details for reconstruction")
+                    logger.error(f"   Strike: {option_strike}, Expiry: {option_expiry}, Symbol: {symbol}")
                 return
+            
+            # Verify this is an option contract, not a stock
+            if not hasattr(contract, 'strike') or not hasattr(contract, 'lastTradeDateOrContractMonth'):
+                logger.error(f"❌ Bot {bot_id}: Contract is not an option contract! Type: {type(contract)}, Contract: {contract}")
+                return
+            
+            # Log contract details for verification
+            logger.info(f"📋 Bot {bot_id}: Using option contract for exit:")
+            logger.info(f"   Symbol: {contract.symbol}")
+            logger.info(f"   Strike: ${contract.strike}")
+            logger.info(f"   Expiry: {contract.lastTradeDateOrContractMonth}")
+            logger.info(f"   Right: {contract.right}")
+            logger.info(f"   Exchange: {contract.exchange}")
+            logger.info(f"   SecType: {contract.secType}")
+            
+            # Calculate how many contracts to sell at this exit line
+            # Split position equally across REMAINING UNFILLED exit lines (not total original lines)
+            exit_lines = bot_state.get('exit_lines', [])
+            
+            # Load filled exit lines
+            filled_exit_lines = bot_state.get('filled_exit_lines', set())
+            if isinstance(filled_exit_lines, str):
+                filled_exit_lines = set(filled_exit_lines.split(',')) if filled_exit_lines else set()
+            elif not isinstance(filled_exit_lines, set):
+                filled_exit_lines = set()
+            
+            # Filter out filled exit lines - only count remaining unfilled lines
+            unfilled_exit_lines = [l for l in exit_lines if l.get('id') not in filled_exit_lines]
+            remaining_exit_lines_count = len(unfilled_exit_lines)
+            
+            if remaining_exit_lines_count == 0:
+                remaining_exit_lines_count = 1  # Fallback to 1 if no unfilled exit lines
+            
+            # Calculate contracts to sell based on remaining unfilled exit lines
+            contracts_to_sell = bot_state['open_shares'] // remaining_exit_lines_count
+            
+            # For the last unfilled exit line, sell any remaining contracts
+            if unfilled_exit_lines and line['id'] == unfilled_exit_lines[-1]['id']:
+                contracts_to_sell = bot_state['open_shares']
+            
+            if contracts_to_sell <= 0:
+                logger.warning(f"⚠️ Bot {bot_id}: Calculated contracts_to_sell={contracts_to_sell}, skipping exit")
+                return
+            
+            logger.info(f"🤖 Bot {bot_id}: Selling {contracts_to_sell} PUT option contracts at exit line ${line.get('price', current_price):.2f}")
+            logger.info(f"   Open contracts: {bot_state['open_shares']}, Remaining unfilled exit lines: {remaining_exit_lines_count}, Filled exit lines: {len(filled_exit_lines)}")
                 
             # Place market sell order for put options
-            order = MarketOrder("SELL", bot_state['open_shares'])
+            from ib_async import MarketOrder
+            order = MarketOrder("SELL", contracts_to_sell)
             trade = await ib_client.place_order(contract, order)
             
-            # Update bot state
-            bot_state['is_bought'] = False
-            bot_state['shares_exited'] += bot_state['open_shares']
-            bot_state['open_shares'] = 0
-            bot_state['crossed_lines'] = set()  # Reset for next cycle
+            if not trade:
+                logger.error(f"❌ Bot {bot_id}: Failed to place exit order for options")
+                return
             
-            # Clear option details
-            bot_state['option_contract'] = None
-            bot_state['option_strike'] = None
-            bot_state['option_expiry'] = None
-            bot_state['option_right'] = None
+            # Update bot state
+            bot_state['shares_exited'] += contracts_to_sell
+            bot_state['open_shares'] = max(0, bot_state['open_shares'] - contracts_to_sell)
+            
+            # Check if all contracts are sold
+            if bot_state['open_shares'] <= 0:
+                bot_state['is_bought'] = False
+                bot_state['crossed_lines'] = set()  # Reset for next cycle
+                
+                # Clear option details
+                bot_state['option_contract'] = None
+                bot_state['option_strike'] = None
+                bot_state['option_expiry'] = None
+                bot_state['option_right'] = None
+                
+                logger.info(f"🎉 Bot {bot_id}: All option contracts sold, position closed")
+            else:
+                logger.info(f"📊 Bot {bot_id}: Partial exit - {contracts_to_sell} contracts sold, {bot_state['open_shares']} remaining")
             
             # Update database
             await self._update_bot_in_db(bot_id, {
-                'is_bought': False,
+                'is_bought': bot_state['is_bought'],
                 'shares_exited': bot_state['shares_exited'],
-                'open_shares': 0
+                'open_shares': bot_state['open_shares']
             })
             
             # Log event
-            await self._log_bot_event(bot_id, 'options_position_closed', {
-                'line_price': line['price'],
+            await self._log_bot_event(bot_id, 'options_position_partial_exit' if bot_state['open_shares'] > 0 else 'options_position_closed', {
+                'line_price': line.get('price', current_price),
                 'current_price': current_price,
-                'contracts': bot_state['shares_exited'],
+                'contracts_sold': contracts_to_sell,
+                'contracts_remaining': bot_state['open_shares'],
                 'strike': bot_state.get('option_strike'),
                 'expiry': bot_state.get('option_expiry'),
                 'order_id': trade.order.orderId if trade.order else None,
                 'strategy': 'downtrend_options'
             })
             
-            logger.info(f"🤖 Bot {bot_id} closed OPTIONS position: {bot_state['shares_exited']} PUT contracts at ${current_price}")
+            logger.info(f"🤖 Bot {bot_id} exited {contracts_to_sell} PUT option contracts at ${current_price:.2f}")
             
         except Exception as e:
             logger.error(f"Error executing options exit trade for bot {bot_id}: {e}")
@@ -2149,7 +3007,12 @@ class BotService:
                 cycle_count += 1
                 self._price_monitoring_cycle = cycle_count
                 logger.info(f"🔍 Price monitoring loop: {len(self.active_bots)} active bots (cycle {cycle_count})")
-                for bot_id, bot_state in self.active_bots.items():
+                # Create a list copy to avoid "dictionary changed size during iteration" error
+                active_bot_ids = list(self.active_bots.keys())
+                for bot_id in active_bot_ids:
+                    if bot_id not in self.active_bots:
+                        continue  # Bot was removed during iteration
+                    bot_state = self.active_bots[bot_id]
                     logger.info(f"🔍 Bot {bot_id}: is_running={bot_state['is_running']}, symbol={bot_state['symbol']}")
                     if bot_state['is_running']:
                         logger.info(f"📊 Getting price for bot {bot_id} ({bot_state['symbol']})")
@@ -2180,7 +3043,12 @@ class BotService:
         while self._running:
             try:
                 # Update bot statuses in database
-                for bot_id, bot_state in self.active_bots.items():
+                # Create a list copy to avoid "dictionary changed size during iteration" error
+                active_bot_ids = list(self.active_bots.keys())
+                for bot_id in active_bot_ids:
+                    if bot_id not in self.active_bots:
+                        continue  # Bot was removed during iteration
+                    bot_state = self.active_bots[bot_id]
                     # Ensure open_shares is calculated correctly
                     shares_entered = bot_state.get('shares_entered', 0)
                     shares_exited = bot_state.get('shares_exited', 0)
@@ -2313,18 +3181,17 @@ class BotService:
                 logger.error(f"Error getting candle data for {symbol}: {e}")
                 return []
     
-    async def _log_detailed_price_info(self, bot_id: int, current_price: float, bot_state: dict):
-        """Log detailed price information including entry/exit lines"""
+    async def _recalculate_line_prices(self, bot_id: int):
+        """Recalculate trend line prices for current time"""
         try:
-            symbol = bot_state['symbol']
-            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
-            is_bought = bot_state.get('is_bought', False)
+            bot_state = self.active_bots.get(bot_id)
+            if not bot_state:
+                return
             
-            # Get entry and exit lines and recalculate their current prices
             entry_lines = bot_state.get('entry_lines', [])
             exit_lines = bot_state.get('exit_lines', [])
             
-            # Recalculate trend line prices for current time
+            # Recalculate entry line prices
             updated_entry_lines = []
             for line in entry_lines:
                 if 'points' in line:
@@ -2335,6 +3202,7 @@ class BotService:
                 else:
                     updated_entry_lines.append(line)
             
+            # Recalculate exit line prices
             updated_exit_lines = []
             for line in exit_lines:
                 if 'points' in line:
@@ -2348,6 +3216,27 @@ class BotService:
             # Update bot state with recalculated prices
             bot_state['entry_lines'] = updated_entry_lines
             bot_state['exit_lines'] = updated_exit_lines
+            
+        except Exception as e:
+            logger.error(f"Error recalculating line prices for bot {bot_id}: {e}", exc_info=True)
+    
+    async def _log_detailed_price_info(self, bot_id: int, current_price: float, bot_state: dict):
+        """Log detailed price information including entry/exit lines"""
+        try:
+            symbol = bot_state['symbol']
+            trend_strategy = bot_state.get('trend_strategy', 'uptrend')
+            is_bought = bot_state.get('is_bought', False)
+            
+            # Get entry and exit lines and recalculate their current prices
+            entry_lines = bot_state.get('entry_lines', [])
+            exit_lines = bot_state.get('exit_lines', [])
+            
+            # Recalculate trend line prices for current time
+            await self._recalculate_line_prices(bot_id)
+            
+            # Get updated lines from bot state
+            updated_entry_lines = bot_state.get('entry_lines', [])
+            updated_exit_lines = bot_state.get('exit_lines', [])
             
             # Create detailed price summary
             price_info = f"🤖 Bot {bot_id} ({symbol}) - Strategy: {trend_strategy.upper()}"
@@ -2386,22 +3275,13 @@ class BotService:
                         shares_per_exit_line = shares_entered // total_exit_lines if total_exit_lines > 0 else 0
                         exit_lines_hit = shares_exited // shares_per_exit_line if shares_per_exit_line > 0 else 0
                         
-                        # Calculate actual percentage based on shares sold
+                        # Calculate actual percentage dynamically based on shares sold
                         if shares_exited >= shares_entered:
                             position_status = "SOLD_100%"
                         elif shares_exited > 0:
-                            # Calculate percentage and round to nearest 25%
+                            # Calculate actual percentage dynamically
                             percentage = (shares_exited / shares_entered) * 100
-                            if percentage >= 87.5:
-                                position_status = "SOLD_100%"
-                            elif percentage >= 62.5:
-                                position_status = "SOLD_75%"
-                            elif percentage >= 37.5:
-                                position_status = "SOLD_50%"
-                            elif percentage >= 12.5:
-                                position_status = "SOLD_25%"
-                            else:
-                                position_status = "SOLD_25%"  # Minimum for any partial fill
+                            position_status = f"SOLD_{percentage:.0f}%"
                         else:
                             position_status = "BOUGHT"
                     else:
@@ -2414,16 +3294,8 @@ class BotService:
                     buy_percentage = (shares_entered / position_size) * 100
                     # If we have partial position (not 100% bought yet)
                     if buy_percentage < 100:
-                        if buy_percentage >= 87.5:
-                            position_status = "BUY_100%"
-                        elif buy_percentage >= 62.5:
-                            position_status = "BUY_75%"
-                        elif buy_percentage >= 37.5:
-                            position_status = "BUY_50%"
-                        elif buy_percentage >= 12.5:
-                            position_status = "BUY_25%"
-                        else:
-                            position_status = "BUY_25%"  # Minimum for any partial fill
+                        # Calculate actual percentage dynamically
+                        position_status = f"BUY_{buy_percentage:.0f}%"
                     else:
                         position_status = "BOUGHT"
                 else:
@@ -2478,7 +3350,14 @@ class BotService:
                     # Convert entry_price to float to avoid Decimal type errors
                     entry_price = float(entry_price)
                     if hard_stop_out_pct > 0:
-                        stop_out_price = entry_price * (1 - hard_stop_out_pct / 100)
+                        # Calculate stop-out price - reverse for downtrend (options)
+                        if trend_strategy == 'downtrend':
+                            # For options: stop price is ABOVE entry (price rises = loss for puts)
+                            stop_out_price = entry_price * (1 + hard_stop_out_pct / 100)
+                        else:
+                            # For stocks: stop price is BELOW entry (price drops = loss)
+                            stop_out_price = entry_price * (1 - hard_stop_out_pct / 100)
+                        
                         distance_to_stop = current_price - stop_out_price
                         direction_to_stop = "ABOVE" if distance_to_stop > 0 else "BELOW"
                         price_info += f"\n🛑 Hard Stop-Out: ${stop_out_price:.2f} ({abs(distance_to_stop):.2f} {direction_to_stop}) [{hard_stop_out_pct}%]"
@@ -2500,12 +3379,24 @@ class BotService:
                     entry_price = float(entry_price)
                     
                     if soft_stop_pct > 0:
-                        soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
+                        # Calculate soft stop price - reverse for downtrend (options)
+                        if trend_strategy == 'downtrend':
+                            # For options: stop price is ABOVE entry (price rises = loss for puts)
+                            soft_stop_price = entry_price * (1 + soft_stop_pct / 100)
+                        else:
+                            # For stocks: stop price is BELOW entry (price drops = loss)
+                            soft_stop_price = entry_price * (1 - soft_stop_pct / 100)
+                        
                         distance_to_soft_stop = current_price - soft_stop_price
                         direction_to_soft_stop = "ABOVE" if distance_to_soft_stop > 0 else "BELOW"
                         
-                        # Check if price is below soft stop
-                        if current_price <= soft_stop_price:
+                        # Check if price triggers soft stop (reversed for downtrend)
+                        if trend_strategy == 'downtrend':
+                            soft_stop_triggered = current_price >= soft_stop_price
+                        else:
+                            soft_stop_triggered = current_price <= soft_stop_price
+                        
+                        if soft_stop_triggered:
                             # Price is below soft stop - show timer status
                             if soft_stop_timer_active and soft_stop_timer_start:
                                 elapsed_seconds = time.time() - soft_stop_timer_start
@@ -2522,12 +3413,18 @@ class BotService:
                                 # Timer should start immediately, but if it's not active yet, show starting
                                 price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - STARTING ({soft_stop_minutes}min timer)"
                         else:
-                            # Price is above soft stop - show inactive status
+                            # Price recovered - show inactive status
                             if soft_stop_timer_active:
                                 # Timer was active but price recovered - should be reset by check
-                                price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - RESET (price recovered above stop)"
+                                if trend_strategy == 'downtrend':
+                                    price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - RESET (price recovered below stop)"
+                                else:
+                                    price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - RESET (price recovered above stop)"
                             else:
-                                price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - INACTIVE (price above stop)"
+                                if trend_strategy == 'downtrend':
+                                    price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - INACTIVE (price below stop)"
+                                else:
+                                    price_info += f"\n⏱️ Soft Stop Timer: ${soft_stop_price:.2f} ({abs(distance_to_soft_stop):.2f} {direction_to_soft_stop}) [{soft_stop_pct}%] - INACTIVE (price above stop)"
                     else:
                         price_info += f"\n⏱️ Soft Stop Timer: Not configured (soft_stop_pct={soft_stop_pct}, entry_price=${entry_price:.2f})"
                 else:
@@ -2627,8 +3524,95 @@ class BotService:
             logger.error(f"Error deleting bot instance {bot_id}: {e}")
             return False
     
+    def _count_trading_hours_between(self, start_ms: int, end_ms: int) -> float:
+        """
+        Count trading hours between two timestamps, excluding:
+        - Weekends (Saturday, Sunday)
+        - Non-trading hours (before 9:30 AM and after 4:00 PM ET)
+        
+        Args:
+            start_ms: Start timestamp in milliseconds
+            end_ms: End timestamp in milliseconds
+            
+        Returns:
+            Trading hours in milliseconds between the two timestamps
+        """
+        try:
+            if end_ms <= start_ms:
+                return 0.0
+            
+            # Convert to datetime in ET timezone
+            et_tz = ZoneInfo('America/New_York')
+            utc_tz = ZoneInfo('UTC')
+            start_dt = datetime.fromtimestamp(start_ms / 1000.0, tz=utc_tz).astimezone(et_tz)
+            end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=utc_tz).astimezone(et_tz)
+            
+            # Market hours: 9:30 AM - 4:00 PM ET (6.5 hours = 23400000 milliseconds)
+            MARKET_OPEN_HOUR = 9
+            MARKET_OPEN_MINUTE = 30
+            MARKET_CLOSE_HOUR = 16
+            MARKET_CLOSE_MINUTE = 0
+            TRADING_HOURS_PER_DAY_MS = 6.5 * 60 * 60 * 1000  # 6.5 hours in milliseconds
+            
+            trading_time_ms = 0.0
+            current_date = start_dt.date()
+            end_date = end_dt.date()
+            
+            # Iterate through each day between start and end
+            while current_date <= end_date:
+                # Create datetime for market open on this day in ET timezone
+                current_dt = datetime(current_date.year, current_date.month, current_date.day, 
+                                      MARKET_OPEN_HOUR, MARKET_OPEN_MINUTE, 0, 0, tzinfo=et_tz)
+                
+                # Skip weekends
+                if current_dt.weekday() >= 5:  # Saturday=5, Sunday=6
+                    current_date += timedelta(days=1)
+                    continue
+                
+                # Determine market open and close for this day
+                market_open = current_dt
+                market_close = current_dt.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE)
+                
+                if current_date == start_dt.date() and current_date == end_dt.date():
+                    # Same day - count partial hours between start and end
+                    day_start = max(start_dt, market_open)
+                    day_end = min(end_dt, market_close)
+                    if day_start < day_end:
+                        trading_time_ms += (day_end - day_start).total_seconds() * 1000
+                elif current_date == start_dt.date():
+                    # Start day - count from start to market close
+                    # If start is after market close, skip to next day (nothing to count)
+                    if start_dt >= market_close:
+                        current_date += timedelta(days=1)
+                        continue
+                    day_start = max(start_dt, market_open)
+                    day_end = market_close
+                    if day_start < day_end:
+                        trading_time_ms += (day_end - day_start).total_seconds() * 1000
+                elif current_date == end_dt.date():
+                    # End day - count from market open to end
+                    day_start = market_open
+                    day_end = min(end_dt, market_close)
+                    if day_start < day_end:
+                        trading_time_ms += (day_end - day_start).total_seconds() * 1000
+                else:
+                    # Full trading day in between
+                    trading_time_ms += TRADING_HOURS_PER_DAY_MS
+                
+                current_date += timedelta(days=1)
+            
+            return trading_time_ms
+            
+        except Exception as e:
+            logger.error(f"Error counting trading hours: {e}", exc_info=True)
+            # Fallback: return absolute time difference (will cause incorrect calculation but won't crash)
+            return float(end_ms - start_ms)
+    
     def _calculate_trend_line_price(self, points):
-        """Calculate current price based on trend line slope and intercept"""
+        """
+        Calculate current price based on trend line slope and intercept.
+        Uses trading session time instead of absolute time to account for non-trading hours.
+        """
         try:
             if len(points) < 2:
                 return 0.0
@@ -2651,31 +3635,46 @@ class BotService:
                 # Times are already in milliseconds
                 current_time = int(time.time() * 1000)  # Current time in milliseconds
             
-            # Calculate slope and intercept using linear regression
-            # y = mx + b where y=price, x=time, m=slope, b=intercept
-            n = len(times)
-            sum_x = sum(times)
+            # Convert absolute timestamps to trading session time (relative to first point)
+            # This accounts for weekends and non-trading hours (TradingView's time axis)
+            # Use the first point as reference (trading time = 0)
+            first_time = times[0]
+            trading_times = [0.0]  # First point is at trading time 0
+            for t in times[1:]:
+                trading_time = self._count_trading_hours_between(first_time, t)
+                trading_times.append(trading_time)
+            
+            # Calculate current trading time relative to first point
+            current_trading_time = self._count_trading_hours_between(first_time, current_time)
+            
+            logger.info(f"Trading session times (relative to first point): {trading_times}, current_trading_time={current_trading_time:.2f}")
+            
+            # Calculate slope and intercept using linear regression with trading session time
+            # y = mx + b where y=price, x=trading_session_time, m=slope, b=intercept
+            n = len(trading_times)
+            sum_x = sum(trading_times)
             sum_y = sum(prices)
-            sum_xy = sum(times[i] * prices[i] for i in range(n))
-            sum_x2 = sum(t * t for t in times)
+            sum_xy = sum(trading_times[i] * prices[i] for i in range(n))
+            sum_x2 = sum(t * t for t in trading_times)
             
             # Calculate slope (m) and intercept (b)
-            if n * sum_x2 - sum_x * sum_x == 0:
-                # Avoid division by zero - return average price
+            denominator = n * sum_x2 - sum_x * sum_x
+            if abs(denominator) < 1e-10:  # Avoid division by zero
+                # Points are at same trading time - return average price
                 return sum_y / n
             
-            slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
+            slope = (n * sum_xy - sum_x * sum_y) / denominator
             intercept = (sum_y - slope * sum_x) / n
             
-            # Calculate current price: price = slope * current_time + intercept
-            current_price = slope * current_time + intercept
+            # Calculate current price: price = slope * current_trading_time + intercept
+            current_price = slope * current_trading_time + intercept
             
-            logger.info(f"Trend line calculation: current_time={current_time}, slope={slope:.8f}, intercept={intercept:.2f}, current_price={current_price:.2f}")
+            logger.info(f"Trend line calculation: current_trading_time={current_trading_time:.2f}, slope={slope:.8f}, intercept={intercept:.2f}, current_price={current_price:.2f}")
             
             return current_price
             
         except Exception as e:
-            logger.error(f"Error calculating trend line price: {e}")
+            logger.error(f"Error calculating trend line price: {e}", exc_info=True)
             # Fallback to average price
             prices = [point['price'] for point in points]
             return sum(prices) / len(prices)
@@ -2743,7 +3742,24 @@ class BotService:
                 return
             
             order = MarketOrder("BUY", shares_to_buy)
-            trade = await ib_client.place_order(contract, order)
+            
+            try:
+                trade = await ib_client.place_order(contract, order)
+            except Exception as e:
+                error_msg = str(e)
+                # Check for IBKR minimum equity requirement error
+                if "2500" in error_msg or "MINIMUM" in error_msg.upper() or "201" in error_msg:
+                    account_equity = await ib_client.get_account_equity()
+                    if account_equity:
+                        logger.error(f"❌ Bot {bot_id}: Multi-buy order rejected - Account equity (${account_equity:.2f}) is below IBKR minimum requirement of $2500 CAD (or equivalent)")
+                        logger.error(f"   Please deposit funds to reach minimum equity requirement, or switch to a cash account")
+                    else:
+                        logger.error(f"❌ Bot {bot_id}: Multi-buy order rejected - IBKR requires minimum equity of $2500 CAD (or equivalent) for margin accounts")
+                        logger.error(f"   Error: {error_msg}")
+                    raise
+                else:
+                    # Re-raise other errors
+                    raise
             
             if trade:
                 logger.info(f"✅ Bot {bot_id}: Multi-buy market order placed - {shares_to_buy} shares (Order ID: {trade.order.orderId})")

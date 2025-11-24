@@ -88,37 +88,18 @@ const BotConfigPanel = ({
       // Priority 1: Check if fully sold first
       if (openShares <= 0) {
         return '🔴 SOLD_100%';
-      } else if (sharesExited > 0) {
-        // Calculate actual percentage based on shares sold (matching backend logic)
-        const percentage = (sharesExited / sharesEntered) * 100;
-        if (percentage >= 87.5) {
-          return '🔴 SOLD_100%';
-        } else if (percentage >= 62.5) {
-          return '🟠 SOLD_75%';
-        } else if (percentage >= 37.5) {
-          return '🟡 SOLD_50%';
-        } else if (percentage >= 12.5) {
-          return '🟢 SOLD_25%';
-        } else {
-          return '🟢 SOLD_25%'; // Minimum for any partial fill
-        }
+      } else if (sharesExited > 0 && sharesEntered > 0) {
+        // Calculate actual percentage dynamically based on shares sold
+        const exitPercentage = (sharesExited / sharesEntered) * 100;
+        return `🟡 SOLD_${exitPercentage.toFixed(0)}%`;
       }
       // Priority 3: Check if multi-buy mode and partially filled (before checking for full BOUGHT)
       else if (multiBuy === 'enabled' && sharesEntered > 0 && positionSize > 0 && sharesExited === 0) {
+        // Calculate actual percentage dynamically based on shares entered
         const buyPercentage = (sharesEntered / positionSize) * 100;
         // If we have partial position (not 100% bought yet)
         if (buyPercentage < 100) {
-          if (buyPercentage >= 87.5) {
-            return '🟢 BUY_100%';
-          } else if (buyPercentage >= 62.5) {
-            return '🟢 BUY_75%';
-          } else if (buyPercentage >= 37.5) {
-            return '🟢 BUY_50%';
-          } else if (buyPercentage >= 12.5) {
-            return '🟢 BUY_25%';
-          } else {
-            return '🟢 BUY_25%'; // Minimum for any partial fill
-          }
+          return `🟢 BUY_${buyPercentage.toFixed(0)}%`;
         } else {
           return '🟢 BOUGHT';
         }
@@ -132,10 +113,9 @@ const BotConfigPanel = ({
       }
       if ((sharesEntered > 0 || openShares > 0) && multiBuy === 'enabled') {
         const buyPercentage = positionSize > 0 ? (sharesEntered / positionSize) * 100 : 0;
-        if (buyPercentage >= 87.5) return '🟢 BUY_100%';
-        if (buyPercentage >= 62.5) return '🟢 BUY_75%';
-        if (buyPercentage >= 37.5) return '🟢 BUY_50%';
-        if (buyPercentage >= 12.5) return '🟢 BUY_25%';
+        if (buyPercentage > 0) {
+          return `🟢 BUY_${buyPercentage.toFixed(0)}%`;
+        }
       }
       return '⚪ NO POSITION';
     }
