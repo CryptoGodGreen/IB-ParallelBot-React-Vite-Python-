@@ -235,6 +235,7 @@ class BotService:
                 real_exit_lines = []
                 upward_lines = []  # For UPTREND: collect all upward lines first
                 downward_lines = []  # For DOWNTREND: collect all downward lines first
+                uptrend_downward_lines = []  # For UPTREND: collect downward lines as exit lines
                 if config and config.layout_data:
                     layout = config.layout_data
                     
@@ -254,11 +255,21 @@ class BotService:
                                     price_diff = prices[-1] - prices[0]  # End - Start
                                     
                                     if trend_strategy == 'uptrend':
-                                        # UPTREND SPOT TRADING: Only use upward lines
+                                        # UPTREND SPOT TRADING: Upward lines for entry/exit, downward lines for entry/exit
                                         # Bottom upward line = Entry, Higher upward lines = Exits
+                                        # Downward lines: Highest = Entry, Lower = Exit (similar to downtrend but for spot trading)
                                         if price_diff > 0:  # Upward trend line
                                             # Store all upward lines first, then sort and assign
                                             upward_lines.append({
+                                                'price': current_price,
+                                                'is_active': True,
+                                                'id': f"line_{line_counter}",  # Use unique string ID
+                                                'points': drawing['points']  # Store points for recalculation
+                                            })
+                                            line_counter += 1
+                                        elif price_diff < 0:  # Downward trend line - can be used as entry or exit
+                                            # Store downward lines for uptrend mode (will be sorted and assigned)
+                                            uptrend_downward_lines.append({
                                                 'price': current_price,
                                                 'is_active': True,
                                                 'id': f"line_{line_counter}",  # Use unique string ID
@@ -330,6 +341,36 @@ class BotService:
                             for i in range(1, len(upward_lines)):
                                 real_exit_lines.append(upward_lines[i])
                                 logger.info(f"🎯 Bot {bot_id}: Added exit line at ${upward_lines[i]['price']:.2f}")
+                    
+                    # For UPTREND: Process downward lines (similar to downtrend but for spot trading)
+                    if trend_strategy == 'uptrend' and uptrend_downward_lines:
+                        # Sort downward lines by price (highest to lowest)
+                        uptrend_downward_lines.sort(key=lambda x: x['price'], reverse=True)
+                        logger.info(f"🎯 Bot {bot_id}: Sorted {len(uptrend_downward_lines)} downward lines for uptrend mode, multi_buy={multi_buy}")
+                        
+                        if multi_buy == 'enabled':
+                            # Multi-buy mode: Top 2 downward lines = Entry, Lower lines = Exit
+                            logger.info(f"🎯 Bot {bot_id}: Multi-buy ENABLED - assigning top 2 downward lines as entry")
+                            if len(uptrend_downward_lines) >= 2:
+                                real_entry_lines.append(uptrend_downward_lines[0])  # Highest downward line = Entry
+                                real_entry_lines.append(uptrend_downward_lines[1])  # 2nd highest downward line = Entry
+                                logger.info(f"🎯 Bot {bot_id}: Added downward entry lines at ${uptrend_downward_lines[0]['price']:.2f} and ${uptrend_downward_lines[1]['price']:.2f}")
+                            
+                            # Lower downward lines = Exit lines
+                            for i in range(2, len(uptrend_downward_lines)):
+                                real_exit_lines.append(uptrend_downward_lines[i])
+                                logger.info(f"🎯 Bot {bot_id}: Added downward exit line at ${uptrend_downward_lines[i]['price']:.2f}")
+                        else:
+                            # Single buy mode: Highest downward line = Entry, Lower lines = Exit
+                            logger.info(f"🎯 Bot {bot_id}: Multi-buy DISABLED - assigning top 1 downward line as entry")
+                            if len(uptrend_downward_lines) > 0:
+                                real_entry_lines.append(uptrend_downward_lines[0])  # Highest downward line = Entry
+                                logger.info(f"🎯 Bot {bot_id}: Added downward entry line at ${uptrend_downward_lines[0]['price']:.2f}")
+                            
+                            # Lower downward lines = Exit lines
+                            for i in range(1, len(uptrend_downward_lines)):
+                                real_exit_lines.append(uptrend_downward_lines[i])
+                                logger.info(f"🎯 Bot {bot_id}: Added downward exit line at ${uptrend_downward_lines[i]['price']:.2f}")
                     
                     logger.info(f"🎯 Extracted {len(real_entry_lines)} entry lines and {len(real_exit_lines)} exit lines from layout_data")
                 
@@ -637,27 +678,69 @@ class BotService:
                         bot_state['crossed_lines'].add(line['id'])
                         
                 else:  # uptrend
-                    # UPTREND: Entry line is below current price, trigger on UPWARD crossing (below → above)
-                    # Check for upward crossing: previous_price < line_price <= current_price
-                    logger.debug(f"🤖 Bot {bot_id}: Checking entry line ${line_price:.2f} (UPTREND) - "
-                               f"Previous: ${previous_price:.2f}, Current: ${current_price:.2f}, "
-                               f"Crossing condition: {previous_price} < {line_price} <= {current_price} = "
-                               f"{previous_price < line_price} and {line_price <= current_price}")
+                    # UPTREND: Can have both upward and downward entry lines
+                    # Upward entry lines: below current price, trigger on UPWARD crossing (below → above)
+                    # Downward entry lines: above current price, trigger on DOWNWARD crossing (above → below)
                     
-                    if previous_price < line_price <= current_price:
-                        logger.info(f"🤖 Bot {bot_id}: ENTRY CROSSING DETECTED (UPTREND - UPWARD)! "
-                                  f"Line: ${line_price:.2f}, Previous: ${previous_price:.2f}, Current: ${current_price:.2f}")
-                        
-                        await self._execute_entry_trade(bot_id, line, current_price)
-                        bot_state['crossed_lines'].add(line['id'])
+                    # Determine if this is a downward line by checking if line price is above current price
+                    # or by checking the line direction from stored points
+                    is_downward_line = False
+                    if 'points' in line and len(line['points']) >= 2:
+                        points = line['points']
+                        prices = [point['price'] for point in points]
+                        if len(prices) >= 2:
+                            price_diff = prices[-1] - prices[0]  # End - Start
+                            is_downward_line = price_diff < 0
                     
-                    # Fallback: If current price is above entry line and no crossing detected yet
-                    elif current_price > line_price:
-                        logger.info(f"🤖 Bot {bot_id}: ENTRY PRICE ABOVE LINE (UPTREND fallback)! "
-                                  f"Line: ${line_price:.2f}, Current: ${current_price:.2f}")
+                    if is_downward_line or line_price > current_price:
+                        # DOWNWARD entry line: trigger on DOWNWARD crossing (above → below)
+                        # Check for downward crossing: previous_price > line_price >= current_price
+                        condition1 = previous_price > line_price
+                        condition2 = line_price >= current_price
+                        crossing_detected = condition1 and condition2
                         
-                        await self._execute_entry_trade(bot_id, line, current_price)
-                        bot_state['crossed_lines'].add(line['id'])
+                        logger.info(f"🔍 Bot {bot_id}: Checking downward entry line ${line_price:.2f} (UPTREND)")
+                        logger.info(f"   Previous: ${previous_price:.2f}, Line: ${line_price:.2f}, Current: ${current_price:.2f}")
+                        logger.info(f"   Condition 1 (previous > line): {previous_price:.2f} > {line_price:.2f} = {condition1}")
+                        logger.info(f"   Condition 2 (line >= current): {line_price:.2f} >= {current_price:.2f} = {condition2}")
+                        logger.info(f"   Crossing detected: {crossing_detected}")
+                        
+                        if crossing_detected:
+                            logger.info(f"🤖 Bot {bot_id}: ENTRY CROSSING DETECTED (UPTREND - DOWNWARD)! "
+                                      f"Line: ${line_price:.2f}, Previous: ${previous_price:.2f}, Current: ${current_price:.2f}")
+                            
+                            await self._execute_entry_trade(bot_id, line, current_price)
+                            bot_state['crossed_lines'].add(line['id'])
+                        
+                        # Fallback: If current price is below entry line and no crossing detected yet
+                        elif current_price < line_price:
+                            logger.info(f"🤖 Bot {bot_id}: ENTRY PRICE BELOW LINE (UPTREND downward fallback)! "
+                                      f"Line: ${line_price:.2f}, Current: ${current_price:.2f}")
+                            
+                            await self._execute_entry_trade(bot_id, line, current_price)
+                            bot_state['crossed_lines'].add(line['id'])
+                    else:
+                        # UPWARD entry line: trigger on UPWARD crossing (below → above)
+                        # Check for upward crossing: previous_price < line_price <= current_price
+                        logger.debug(f"🤖 Bot {bot_id}: Checking upward entry line ${line_price:.2f} (UPTREND) - "
+                                   f"Previous: ${previous_price:.2f}, Current: ${current_price:.2f}, "
+                                   f"Crossing condition: {previous_price} < {line_price} <= {current_price} = "
+                                   f"{previous_price < line_price} and {line_price <= current_price}")
+                        
+                        if previous_price < line_price <= current_price:
+                            logger.info(f"🤖 Bot {bot_id}: ENTRY CROSSING DETECTED (UPTREND - UPWARD)! "
+                                      f"Line: ${line_price:.2f}, Previous: ${previous_price:.2f}, Current: ${current_price:.2f}")
+                            
+                            await self._execute_entry_trade(bot_id, line, current_price)
+                            bot_state['crossed_lines'].add(line['id'])
+                        
+                        # Fallback: If current price is above entry line and no crossing detected yet
+                        elif current_price > line_price:
+                            logger.info(f"🤖 Bot {bot_id}: ENTRY PRICE ABOVE LINE (UPTREND upward fallback)! "
+                                      f"Line: ${line_price:.2f}, Current: ${current_price:.2f}")
+                            
+                            await self._execute_entry_trade(bot_id, line, current_price)
+                            bot_state['crossed_lines'].add(line['id'])
         
         # Check exit lines (downward crossing)
         if bot_state['is_bought'] and bot_state['open_shares'] > 0:
