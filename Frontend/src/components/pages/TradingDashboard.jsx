@@ -24,7 +24,7 @@ const TradingDashboard = () => {
       // Fallback to mock data if API fails
       console.log('📝 Using fallback mock data');
       setConfigurations([
-        { id: 501, name: 'AAPL 60M', symbol: 'AAPL', interval: '60M', status: 'active' },
+        { id: 501, name: 'NU 60M', symbol: 'NU', interval: '60M', status: 'active' },
         { id: 257, name: 'SPY 15M', symbol: 'SPY', interval: '15M', status: 'stopped' },
       ]);
     }

@@ -55,7 +55,17 @@ class BotService:
                     select(UserChart).where(UserChart.id == config_data['config_id'])
                 )
                 config = config_result.scalar_one_or_none()
-                trade_amount = config.trade_amount if config else 1000
+                # Use trade_amount from config, or get default_trade_size from bot_config, or default to 250
+                if config and config.trade_amount:
+                    trade_amount = config.trade_amount
+                else:
+                    # Get default_trade_size from bot_configurations
+                    from app.models.bot_config import BotConfiguration
+                    bot_config_result = await session.execute(
+                        select(BotConfiguration).order_by(BotConfiguration.id.desc()).limit(1)
+                    )
+                    bot_config = bot_config_result.scalar_one_or_none()
+                    trade_amount = float(bot_config.default_trade_size) if bot_config and bot_config.default_trade_size else 250
                 
                 # Create bot instance
                 bot = BotInstance(
@@ -197,7 +207,7 @@ class BotService:
                 config = config_result.scalar_one_or_none()
                 trend_strategy = config.trend_strategy if config else "uptrend"
                 multi_buy = config.multi_buy if config else "disabled"
-                trade_amount = float(config.trade_amount) if config and config.trade_amount else 1000.0
+                trade_amount = float(config.trade_amount) if config and config.trade_amount else 250.0
                 interval = config.interval if config else "1M"  # Get interval from chart config
                 
                 # Get bot configuration settings (global settings)
@@ -893,6 +903,7 @@ class BotService:
                     'line_price': bot_state.get('entry_order_price', bot_state['entry_price']),
                     'current_price': current_price,
                     'shares_bought': bot_state['shares_entered'],
+                    'quantity': bot_state['shares_entered'],  # Also include as 'quantity' for consistency
                     'order_id': order_id,
                     'order_status': 'FILLED',
                     'strategy': 'uptrend_spot_limit'
@@ -979,8 +990,49 @@ class BotService:
             if order_status_normalized == 'FILLED':
                 logger.info(f"✅ Bot {bot_id}: Exit order {order_id} FILLED!")
                 
-                # Update bot state
-                shares_sold = order_info['quantity']
+                # Try to get actual filled quantity from IBKR fills
+                shares_sold = order_info.get('quantity', 0)
+                if shares_sold == 0:
+                    # Try to get from IBKR fills
+                    try:
+                        from app.utils.ib_client import ib_client
+                        await ib_client.ensure_connected()
+                        fills = ib_client.ib.fills()
+                        for fill in fills:
+                            try:
+                                if fill.execution.orderId == order_id:
+                                    shares_sold = int(fill.execution.shares) if hasattr(fill.execution, 'shares') else shares_sold
+                                    logger.info(f"✅ Bot {bot_id}: Got filled quantity {shares_sold} from IBKR fills for order {order_id}")
+                                    break
+                            except (AttributeError, ValueError):
+                                continue
+                    except Exception as e:
+                        logger.warning(f"⚠️ Bot {bot_id}: Could not get filled quantity from IBKR: {e}")
+                
+                # If still 0, try to infer from bot state (calculate from shares_exited change)
+                if shares_sold == 0:
+                    # Store current shares_exited before update to calculate difference
+                    previous_shares_exited = bot_state.get('shares_exited', 0)
+                    # Use stored quantity or calculate from exit line if available
+                    shares_sold = order_info.get('quantity', 0)
+                    if shares_sold == 0 and exit_line:
+                        # Try to calculate from position size and exit lines
+                        total_exit_lines = len(bot_state.get('exit_lines', []))
+                        filled_exit_lines = len(bot_state.get('filled_exit_lines', set()))
+                        if total_exit_lines > 0:
+                            # Estimate: divide remaining shares by remaining exit lines
+                            remaining_exit_lines = total_exit_lines - filled_exit_lines
+                            if remaining_exit_lines > 0:
+                                shares_sold = bot_state.get('open_shares', 0) // remaining_exit_lines
+                                if shares_sold == 0:
+                                    # Fallback: use position_size divided by total exit lines
+                                    shares_sold = bot_state.get('position_size', 0) // total_exit_lines
+                
+                # Ensure we have a valid quantity
+                if shares_sold <= 0:
+                    logger.warning(f"⚠️ Bot {bot_id}: Could not determine filled quantity for order {order_id}, using stored quantity or defaulting to 1")
+                    shares_sold = order_info.get('quantity', 1)  # Default to 1 if all else fails
+                
                 exit_line_price = order_info.get('price', 0)
                 line_id = order_info.get('line_id', '')
                 bot_state['shares_exited'] += shares_sold
@@ -1015,6 +1067,7 @@ class BotService:
                     'line_price': exit_line_price,
                     'current_price': current_price,
                     'shares_to_sell': shares_sold,
+                    'quantity': shares_sold,  # Also include as 'quantity' for consistency
                     'order_id': order_id,
                     'order_status': 'FILLED',
                     'line_id': line_id,

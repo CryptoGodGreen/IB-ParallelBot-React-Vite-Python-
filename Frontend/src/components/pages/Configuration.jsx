@@ -12,17 +12,17 @@ const Configuration = () => {
   // Bot configuration state
   const [botConfig, setBotConfig] = useState({
     email_updates: true,
-    default_trade_size: 10000,
-    stop_loss_5m: 5.0,
-    stop_loss_minutes_5m: 5,
-    hard_stop_5m: 5.0,
-    stop_loss_15m: 5.0,
-    stop_loss_minutes_15m: 5,
-    hard_stop_15m: 5.0,
-    stop_loss_1h: 5.0,
-    stop_loss_minutes_1h: 5,
-    hard_stop_1h: 5.0,
-    symbols: 'AAPL,SPY,TSLA,MSFT,GOOGL,EUR,CAD'
+    default_trade_size: 250,
+    stop_loss_5m: 1.0,
+    stop_loss_minutes_5m: 60,
+    hard_stop_5m: 2.5,
+    stop_loss_15m: 1.5,
+    stop_loss_minutes_15m: 90,
+    hard_stop_15m: 4.0,
+    stop_loss_1h: 2.5,
+    stop_loss_minutes_1h: 300,
+    hard_stop_1h: 6.0,
+    symbols: 'NU,OSCR,JOBY,ACHR,SOFI,GME,SMCI'
   });
   const [savingConfig, setSavingConfig] = useState(false);
 
@@ -146,9 +146,9 @@ const Configuration = () => {
 
             {/* 5m Settings */}
             <div className="interval-group">
-              <h3 className="interval-title">5m</h3>
+              <h3 className="interval-title">5M</h3>
               <div className="form-group">
-                <label htmlFor="stop_loss_5m">5m stop loss</label>
+                <label htmlFor="stop_loss_5m">5M Soft Stop (%)</label>
                 <input
                   id="stop_loss_5m"
                   type="number"
@@ -160,7 +160,7 @@ const Configuration = () => {
                 />
               </div>
               <div className="form-group">
-                <label htmlFor="stop_loss_minutes_5m">5m stop loss minutes</label>
+                <label htmlFor="stop_loss_minutes_5m">5M Stop Timer (minutes)</label>
                 <input
                   id="stop_loss_minutes_5m"
                   type="number"
@@ -171,7 +171,7 @@ const Configuration = () => {
                 />
               </div>
               <div className="form-group">
-                <label htmlFor="hard_stop_5m">5m hard stop</label>
+                <label htmlFor="hard_stop_5m">5M Hard Stop (%)</label>
                 <input
                   id="hard_stop_5m"
                   type="number"
@@ -186,9 +186,9 @@ const Configuration = () => {
 
             {/* 15m Settings */}
             <div className="interval-group">
-              <h3 className="interval-title">15m</h3>
+              <h3 className="interval-title">15M</h3>
               <div className="form-group">
-                <label htmlFor="stop_loss_15m">15m stop loss</label>
+                <label htmlFor="stop_loss_15m">15M Soft Stop (%)</label>
                 <input
                   id="stop_loss_15m"
                   type="number"
@@ -200,7 +200,7 @@ const Configuration = () => {
                 />
               </div>
               <div className="form-group">
-                <label htmlFor="stop_loss_minutes_15m">15m stop loss minutes</label>
+                <label htmlFor="stop_loss_minutes_15m">15M Stop Timer (minutes)</label>
                 <input
                   id="stop_loss_minutes_15m"
                   type="number"
@@ -211,7 +211,7 @@ const Configuration = () => {
                 />
               </div>
               <div className="form-group">
-                <label htmlFor="hard_stop_15m">15m hard stop loss</label>
+                <label htmlFor="hard_stop_15m">15M Hard Stop (%)</label>
                 <input
                   id="hard_stop_15m"
                   type="number"
@@ -226,9 +226,9 @@ const Configuration = () => {
 
             {/* 1h Settings */}
             <div className="interval-group">
-              <h3 className="interval-title">1h</h3>
+              <h3 className="interval-title">1H</h3>
               <div className="form-group">
-                <label htmlFor="stop_loss_1h">1h stop loss</label>
+                <label htmlFor="stop_loss_1h">1H Soft Stop (%)</label>
                 <input
                   id="stop_loss_1h"
                   type="number"
@@ -240,7 +240,7 @@ const Configuration = () => {
                 />
               </div>
               <div className="form-group">
-                <label htmlFor="stop_loss_minutes_1h">1h stop loss minutes</label>
+                <label htmlFor="stop_loss_minutes_1h">1H Stop Timer (minutes)</label>
                 <input
                   id="stop_loss_minutes_1h"
                   type="number"
@@ -251,7 +251,7 @@ const Configuration = () => {
                 />
               </div>
               <div className="form-group">
-                <label htmlFor="hard_stop_1h">1h hard stop</label>
+                <label htmlFor="hard_stop_1h">1H Hard Stop (%)</label>
                 <input
                   id="hard_stop_1h"
                   type="number"

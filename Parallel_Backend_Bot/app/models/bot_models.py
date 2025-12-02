@@ -21,7 +21,7 @@ class BotInstance(Base):
     shares_entered = Column(Integer, default=0)
     shares_exited = Column(Integer, default=0)
     open_shares = Column(Integer, default=0)
-    position_size = Column(Integer, default=1000)
+    position_size = Column(Integer, default=250)
     max_position = Column(Integer, default=10000)
     
     # Order tracking fields

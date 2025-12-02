@@ -1545,7 +1545,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
         const initialInterval = selectedConfig?.interval ? convertInterval(selectedConfig.interval) : '5';
 
         const widgetOptions = {
-          symbol: symbol || selectedConfig?.symbol || 'AAPL',
+          symbol: symbol || selectedConfig?.symbol || 'NU',
           datafeed: datafeed,
           interval: initialInterval,
           container: containerRef.current,
@@ -1712,7 +1712,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
         // Set symbol and interval from the selected configuration
         if (selectedConfig.symbol || selectedConfig.interval) {
           try {
-            const symbol = selectedConfig.symbol || 'AAPL';
+            const symbol = selectedConfig.symbol || 'NU';
             const interval = selectedConfig.interval || '5M';
             
             // Convert interval format for TradingView (1M -> 1, etc.)

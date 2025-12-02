@@ -17,7 +17,7 @@ class BotCreateRequest(BaseModel):
     config_id: int
     symbol: str
     name: str
-    position_size: int = 1000
+    position_size: int = 250
     max_position: int = 10000
 
 class BotLineRequest(BaseModel):
@@ -496,12 +496,16 @@ async def get_all_bots_trade_history(
                         if event.event_type in ("spot_entry_market_order", "spot_entry_limit_order", "options_entry_market_order", "options_entry_limit_order"):
                             if (event_data.get("order_status", "").upper() == "FILLED" or 
                                 event_data.get("order_status", "").upper() == "SUBMITTED"):
+                                # Get quantity - use 'quantity' field if available, otherwise fall back to 'shares_bought' or 'shares_filled'
+                                quantity = (event_data.get("quantity") or 
+                                           event_data.get("shares_bought") or 
+                                           event_data.get("shares_filled") or 0)
                                 bot_trade_history.append({
                                     "side": "BUY",
                                     "filled": "Yes" if event_data.get("order_status", "").upper() == "FILLED" else "Pending",
                                     "target": event_data.get("target", "Entry"),
                                     "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                                    "shares_filled": event_data.get("quantity", event_data.get("shares_filled", 0)),
+                                    "shares_filled": quantity,
                                     "price": event_data.get("price", 0.0),
                                     "order_id": order_id,
                                     "event_type": event.event_type,
@@ -518,12 +522,18 @@ async def get_all_bots_trade_history(
                             if order_id:
                                 included_order_ids.add(order_id)
                             
+                            # Get quantity - use 'quantity' field if available, otherwise fall back to multiple fields
+                            quantity = (event_data.get("quantity") or 
+                                       event_data.get("shares_to_sell") or 
+                                       event_data.get("shares_sold") or 
+                                       event_data.get("contracts_sold") or 
+                                       event_data.get("shares_filled") or 0)
                             bot_trade_history.append({
                                 "side": "SELL",
                                 "filled": "Yes" if event_data.get("order_status", "").upper() == "FILLED" else "Pending",
                                 "target": event_data.get("target", "Exit"),
                                 "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                                "shares_filled": event_data.get("quantity", event_data.get("shares_filled", 0)),
+                                "shares_filled": quantity,
                                 "price": event_data.get("price", 0.0),
                                 "order_id": order_id,
                                 "event_type": event.event_type,
@@ -686,12 +696,14 @@ async def get_bot_trade_history(
                             target_label = f"Entry {order_sequence}"
                         else:
                             target_label = "Entry"
+                        # Get quantity - use 'quantity' field if available, otherwise fall back to 'shares_bought'
+                        quantity = event_data.get("quantity") or event_data.get("shares_bought", 0)
                         trade_history.append({
                             "side": "BUY",
                             "filled": "Yes",
                             "target": target_label,
                             "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                            "shares_filled": event_data.get("shares_bought", 0),
+                            "shares_filled": quantity,
                             "price": event_data.get("line_price", event_data.get("entry_price", 0)),
                             "order_id": order_id,
                             "event_type": event.event_type
@@ -702,12 +714,14 @@ async def get_bot_trade_history(
                     # Only add summary spot_position_opened if we don't have individual entry order events
                     # (spot_position_opened is a summary event, and we prefer individual entry order events)
                     if not has_individual_entry_orders and (not order_id or order_id not in included_order_ids):
+                        # Get quantity - use 'quantity' field if available, otherwise fall back to 'shares_bought'
+                        quantity = event_data.get("quantity") or event_data.get("shares_bought", 0)
                         trade_history.append({
                             "side": "BUY",
                             "filled": "Yes",
                             "target": "Entry",
                             "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                            "shares_filled": event_data.get("shares_bought", 0),
+                            "shares_filled": quantity,
                             "price": event_data.get("entry_price", 0),
                             "order_id": order_id,
                             "event_type": event.event_type
@@ -744,7 +758,11 @@ async def get_bot_trade_history(
                     exit_key = (order_id, line_id) if order_id else None
                     
                     # Get quantity - use 'quantity' field if available, otherwise fall back to 'shares_to_sell'
-                    quantity = event_data.get("quantity") or event_data.get("shares_to_sell", 0)
+                    # Also check for 'shares_sold' or 'contracts_sold' as additional fallbacks
+                    quantity = (event_data.get("quantity") or 
+                               event_data.get("shares_to_sell") or 
+                               event_data.get("shares_sold") or 
+                               event_data.get("contracts_sold") or 0)
                     
                     if order_status == "FILLED":
                         # Exit order filled - always include filled orders

@@ -72,9 +72,9 @@ export class TradingService {
         },
         body: JSON.stringify({
           config_id: configId,
-          symbol: configData.symbol || 'AAPL',
+          symbol: configData.symbol || 'NU',
           name: configData.name || `Bot ${configId}`,
-          position_size: configData.position_size || 1000,
+          position_size: configData.trade_amount || configData.position_size || 250,
           max_position: configData.max_position || 10000
         })
       });

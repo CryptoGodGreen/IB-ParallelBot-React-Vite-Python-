@@ -36,7 +36,7 @@ class BotConfiguration(BaseModel):
     """Configuration for the limit-order ladder trading bot."""
     # Position management
     max_position: float = 10000
-    position_size: float = 1000
+    position_size: float = 250
     max_distance_from_entry: float = 0.05  # 5% max distance from entry line
     
     # Stop-out rules by timeframe
@@ -72,7 +72,7 @@ class ChartDataBase(BaseModel):
     symbol: str
     interval: str
     rth: bool = True
-    trade_amount: Optional[float] = 1000  # Trade amount in USD
+    trade_amount: Optional[float] = 250  # Trade amount in USD
     trend_strategy: TrendStrategy = TrendStrategy.uptrend  # Trading strategy
     layout_data: LayoutData # Using the new structured model
     bot_hard_stop_out: Optional[str] = "5"  # Hard stop-out percentage (default 5%)

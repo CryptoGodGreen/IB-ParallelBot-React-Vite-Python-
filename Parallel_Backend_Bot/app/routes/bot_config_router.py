@@ -18,17 +18,17 @@ router = APIRouter(prefix="/bot-config", tags=["Bot Configuration"])
 class BotConfigResponse(BaseModel):
     id: Optional[int] = None
     email_updates: bool = True
-    default_trade_size: float = 10000.0
-    stop_loss_5m: float = 5.0
-    stop_loss_minutes_5m: int = 5
-    hard_stop_5m: float = 5.0
-    stop_loss_15m: float = 5.0
-    stop_loss_minutes_15m: int = 5
-    hard_stop_15m: float = 5.0
-    stop_loss_1h: float = 5.0
-    stop_loss_minutes_1h: int = 5
-    hard_stop_1h: float = 5.0
-    symbols: str = "AAPL,SPY,TSLA,MSFT,GOOGL,EUR,CAD"
+    default_trade_size: float = 250.0
+    stop_loss_5m: float = 1.0
+    stop_loss_minutes_5m: int = 60
+    hard_stop_5m: float = 2.5
+    stop_loss_15m: float = 1.5
+    stop_loss_minutes_15m: int = 90
+    hard_stop_15m: float = 4.0
+    stop_loss_1h: float = 2.5
+    stop_loss_minutes_1h: int = 300
+    hard_stop_1h: float = 6.0
+    symbols: str = "NU,OSCR,JOBY,ACHR,SOFI,GME,SMCI"
 
 class BotConfigUpdate(BaseModel):
     email_updates: Optional[bool] = None
@@ -63,17 +63,17 @@ async def get_bot_config(
             return BotConfigResponse(
                 id=config.id,
                 email_updates=config.email_updates,
-                default_trade_size=float(config.default_trade_size) if config.default_trade_size else 10000.0,
-                stop_loss_5m=float(config.stop_loss_5m) if config.stop_loss_5m else 5.0,
-                stop_loss_minutes_5m=config.stop_loss_minutes_5m or 5,
-                hard_stop_5m=float(config.hard_stop_5m) if config.hard_stop_5m else 5.0,
-                stop_loss_15m=float(config.stop_loss_15m) if config.stop_loss_15m else 5.0,
-                stop_loss_minutes_15m=config.stop_loss_minutes_15m or 5,
-                hard_stop_15m=float(config.hard_stop_15m) if config.hard_stop_15m else 5.0,
-                stop_loss_1h=float(config.stop_loss_1h) if config.stop_loss_1h else 5.0,
-                stop_loss_minutes_1h=config.stop_loss_minutes_1h or 5,
-                hard_stop_1h=float(config.hard_stop_1h) if config.hard_stop_1h else 5.0,
-                symbols=config.symbols or "AAPL,SPY,TSLA,MSFT,GOOGL,EUR,CAD"
+                default_trade_size=float(config.default_trade_size) if config.default_trade_size else 250.0,
+                stop_loss_5m=float(config.stop_loss_5m) if config.stop_loss_5m else 1.0,
+                stop_loss_minutes_5m=config.stop_loss_minutes_5m or 60,
+                hard_stop_5m=float(config.hard_stop_5m) if config.hard_stop_5m else 2.5,
+                stop_loss_15m=float(config.stop_loss_15m) if config.stop_loss_15m else 1.5,
+                stop_loss_minutes_15m=config.stop_loss_minutes_15m or 90,
+                hard_stop_15m=float(config.hard_stop_15m) if config.hard_stop_15m else 4.0,
+                stop_loss_1h=float(config.stop_loss_1h) if config.stop_loss_1h else 2.5,
+                stop_loss_minutes_1h=config.stop_loss_minutes_1h or 300,
+                hard_stop_1h=float(config.hard_stop_1h) if config.hard_stop_1h else 6.0,
+                symbols=config.symbols or "NU,OSCR,JOBY,ACHR,SOFI,GME,SMCI"
             )
     except Exception as e:
         logger.error(f"Error getting bot configuration: {e}")
@@ -151,17 +151,17 @@ async def update_bot_config(
             return BotConfigResponse(
                 id=updated_config.id,
                 email_updates=updated_config.email_updates,
-                default_trade_size=float(updated_config.default_trade_size) if updated_config.default_trade_size else 10000.0,
-                stop_loss_5m=float(updated_config.stop_loss_5m) if updated_config.stop_loss_5m else 5.0,
-                stop_loss_minutes_5m=updated_config.stop_loss_minutes_5m or 5,
-                hard_stop_5m=float(updated_config.hard_stop_5m) if updated_config.hard_stop_5m else 5.0,
-                stop_loss_15m=float(updated_config.stop_loss_15m) if updated_config.stop_loss_15m else 5.0,
-                stop_loss_minutes_15m=updated_config.stop_loss_minutes_15m or 5,
-                hard_stop_15m=float(updated_config.hard_stop_15m) if updated_config.hard_stop_15m else 5.0,
-                stop_loss_1h=float(updated_config.stop_loss_1h) if updated_config.stop_loss_1h else 5.0,
-                stop_loss_minutes_1h=updated_config.stop_loss_minutes_1h or 5,
-                hard_stop_1h=float(updated_config.hard_stop_1h) if updated_config.hard_stop_1h else 5.0,
-                symbols=updated_config.symbols or "AAPL,SPY,TSLA,MSFT,GOOGL,EUR,CAD"
+                default_trade_size=float(updated_config.default_trade_size) if updated_config.default_trade_size else 250.0,
+                stop_loss_5m=float(updated_config.stop_loss_5m) if updated_config.stop_loss_5m else 1.0,
+                stop_loss_minutes_5m=updated_config.stop_loss_minutes_5m or 60,
+                hard_stop_5m=float(updated_config.hard_stop_5m) if updated_config.hard_stop_5m else 2.5,
+                stop_loss_15m=float(updated_config.stop_loss_15m) if updated_config.stop_loss_15m else 1.5,
+                stop_loss_minutes_15m=updated_config.stop_loss_minutes_15m or 90,
+                hard_stop_15m=float(updated_config.hard_stop_15m) if updated_config.hard_stop_15m else 4.0,
+                stop_loss_1h=float(updated_config.stop_loss_1h) if updated_config.stop_loss_1h else 2.5,
+                stop_loss_minutes_1h=updated_config.stop_loss_minutes_1h or 300,
+                hard_stop_1h=float(updated_config.hard_stop_1h) if updated_config.hard_stop_1h else 6.0,
+                symbols=updated_config.symbols or "NU,OSCR,JOBY,ACHR,SOFI,GME,SMCI"
             )
     except Exception as e:
         logger.error(f"Error updating bot configuration: {e}")

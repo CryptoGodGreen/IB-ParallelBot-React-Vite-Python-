@@ -13,7 +13,7 @@ const ConfigurationPanel = ({
   const [showNewConfigForm, setShowNewConfigForm] = useState(false);
   const [newConfig, setNewConfig] = useState({
     name: '',
-    symbol: 'AAPL',
+    symbol: 'NU',
     interval: '5M'
   });
   const [deleteTargetId, setDeleteTargetId] = useState(null);
@@ -40,7 +40,7 @@ const ConfigurationPanel = ({
       };
       
       console.log('🔧 Calling onConfigCreate with:', configData);
-      setNewConfig({ name: '', symbol: 'AAPL', interval: '5M' });
+      setNewConfig({ name: '', symbol: 'NU', interval: '5M' });
       setShowNewConfigForm(false);
       onConfigCreate(configData);
     } else {

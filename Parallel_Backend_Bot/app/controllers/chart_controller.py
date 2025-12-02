@@ -16,8 +16,23 @@ async def create_chart(db: AsyncSession, chart_data: ChartCreate, current_user: 
     """
     Creates and saves a new chart layout for the current user.
     """
+    chart_dict = chart_data.model_dump()
+    
+    # Get default_trade_size from bot_config
+    from app.models.bot_config import BotConfiguration
+    bot_config_result = await db.execute(
+        select(BotConfiguration).order_by(BotConfiguration.id.desc()).limit(1)
+    )
+    bot_config = bot_config_result.scalar_one_or_none()
+    default_trade_size = float(bot_config.default_trade_size) if bot_config and bot_config.default_trade_size else 250.0
+    
+    # If trade_amount is not provided, None, or is the old default (1000), use default_trade_size
+    trade_amount = chart_dict.get('trade_amount')
+    if trade_amount is None or trade_amount == 1000.0:
+        chart_dict['trade_amount'] = default_trade_size
+    
     new_chart = UserChart(
-        **chart_data.model_dump(),
+        **chart_dict,
         user_id=current_user.id
     )
     db.add(new_chart)

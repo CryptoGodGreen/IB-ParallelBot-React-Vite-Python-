@@ -11,11 +11,11 @@ const BotConfigPanel = ({
 }) => {
   const [config, setConfig] = useState({
     name: '',
-    symbol: 'AAPL',
+    symbol: 'NU',
     ownedBy: 'admin',
     marketDirection: 'Uptrend',
     botPublished: false,
-    tradeAmount: 1000,
+    tradeAmount: 250,
     tradeEquityOrOption: 'Equity',
     botStopOutTime: 240,
     botHardStopOut: '3',
@@ -249,7 +249,7 @@ const BotConfigPanel = ({
         ownedBy: selectedConfig.owned_by || prev.ownedBy,
         trendStrategy: selectedConfig.trend_strategy || prev.trendStrategy || 'uptrend',
         botPublished: selectedConfig.bot_published !== undefined ? selectedConfig.bot_published : prev.botPublished,
-        tradeAmount: selectedConfig.trade_amount || prev.tradeAmount || 1000,
+        tradeAmount: selectedConfig.trade_amount || prev.tradeAmount || 250,
         tradeEquityOrOption: selectedConfig.trade_equity_or_option || prev.tradeEquityOrOption || 'Equity',
         botStopOutTime: selectedConfig.bot_stop_out_time || prev.botStopOutTime || 240,
         botHardStopOut: selectedConfig.bot_hard_stop_out || prev.botHardStopOut || '3',
@@ -412,8 +412,8 @@ const BotConfigPanel = ({
       return;
     }
 
-    // Use symbol from selectedConfig first, then fallback to config.symbol, then 'AAPL'
-    const symbol = selectedConfig.symbol || config.symbol || 'AAPL';
+    // Use symbol from selectedConfig first, then fallback to config.symbol, then 'NU'
+    const symbol = selectedConfig.symbol || config.symbol || 'NU';
     console.log(`🛒 Placing test market buy order for symbol: ${symbol}`);
     setOrderStatus({ type: 'pending', message: `Placing market buy order for ${symbol}...` });
 
@@ -475,7 +475,7 @@ const BotConfigPanel = ({
       return;
     }
 
-    const symbol = selectedConfig.symbol || config.symbol || 'AAPL';
+    const symbol = selectedConfig.symbol || config.symbol || 'NU';
     console.log(`🛒 Placing test market sell order for symbol: ${symbol}`);
     console.log(`🔍 ChartService instance:`, chartService);
     console.log(`🔍 ChartService methods:`, Object.getOwnPropertyNames(Object.getPrototypeOf(chartService)));
@@ -645,7 +645,7 @@ const BotConfigPanel = ({
           <label>Trade Amount:</label>
           <input
             type="number"
-            value={config.tradeAmount || (selectedConfig?.trade_amount || 1000)}
+            value={config.tradeAmount || (selectedConfig?.trade_amount || 250)}
             onChange={(e) => handleConfigChange('tradeAmount', parseInt(e.target.value))}
           />
         </div>

@@ -64,7 +64,7 @@ const PositionDisplay = ({ position, onClose }) => {
     <div className="position-display">
       <div className="position-header">
         <div className="position-title">
-          <span className="symbol">{position?.symbol || 'AAPL'}</span>
+          <span className="symbol">{position?.symbol || 'NU'}</span>
           <span className="status">{getPositionStatus()}</span>
         </div>
         <div className="position-meta">
