@@ -882,12 +882,41 @@ class BotService:
             if order_status == 'Filled':
                 logger.info(f"✅ Bot {bot_id}: Entry order {order_id} FILLED!")
                 
+                # Try to get actual fill price from IBKR fills
+                fill_price = None
+                try:
+                    await ib_client.ensure_connected()
+                    fills = ib_client.ib.fills()
+                    for fill in fills:
+                        try:
+                            if fill.execution.orderId == order_id:
+                                # Get fill price - try avgPrice first, then price
+                                fill_price = (getattr(fill.execution, 'avgPrice', None) or 
+                                             getattr(fill.execution, 'price', None) or
+                                             getattr(fill, 'avgFillPrice', None) or
+                                             getattr(fill, 'fillPrice', None))
+                                if fill_price:
+                                    logger.info(f"✅ Bot {bot_id}: Got entry fill price ${fill_price:.6f} from IBKR fills for order {order_id}")
+                                    # Update entry_price with actual fill price if available
+                                    bot_state['entry_price'] = fill_price
+                                    bot_state['entry_order_price'] = fill_price
+                                break
+                        except (AttributeError, ValueError) as e:
+                            logger.debug(f"⚠️ Bot {bot_id}: Error extracting entry fill data: {e}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"⚠️ Bot {bot_id}: Could not get entry fill price from IBKR: {e}")
+                
                 # Update bot state to BOUGHT
                 bot_state['is_bought'] = True
-                bot_state['entry_price'] = bot_state['entry_order_price']
+                if bot_state['entry_price'] == 0:
+                    bot_state['entry_price'] = bot_state['entry_order_price']
                 bot_state['shares_entered'] = bot_state['entry_order_quantity']
                 bot_state['open_shares'] = bot_state['entry_order_quantity']
                 bot_state['entry_order_status'] = 'FILLED'
+                
+                # Determine the price to log - prefer actual fill price, then line price
+                logged_price = fill_price if fill_price else bot_state.get('entry_order_price', bot_state['entry_price'])
                 
                 # Update database
                 await self._update_bot_in_db(bot_id, {
@@ -902,6 +931,8 @@ class BotService:
                 await self._log_bot_event(bot_id, 'spot_entry_limit_order', {
                     'line_price': bot_state.get('entry_order_price', bot_state['entry_price']),
                     'current_price': current_price,
+                    'fill_price': fill_price,  # Actual fill price from IBKR
+                    'price': logged_price,  # Price to display (prefer fill_price)
                     'shares_bought': bot_state['shares_entered'],
                     'quantity': bot_state['shares_entered'],  # Also include as 'quantity' for consistency
                     'order_id': order_id,
@@ -990,24 +1021,34 @@ class BotService:
             if order_status_normalized == 'FILLED':
                 logger.info(f"✅ Bot {bot_id}: Exit order {order_id} FILLED!")
                 
-                # Try to get actual filled quantity from IBKR fills
+                # Try to get actual filled quantity and price from IBKR fills
                 shares_sold = order_info.get('quantity', 0)
-                if shares_sold == 0:
-                    # Try to get from IBKR fills
-                    try:
-                        from app.utils.ib_client import ib_client
-                        await ib_client.ensure_connected()
-                        fills = ib_client.ib.fills()
-                        for fill in fills:
-                            try:
-                                if fill.execution.orderId == order_id:
+                fill_price = None  # Will store actual fill price from IBKR
+                # Always try to get fill price from IBKR fills
+                try:
+                    from app.utils.ib_client import ib_client
+                    await ib_client.ensure_connected()
+                    fills = ib_client.ib.fills()
+                    for fill in fills:
+                        try:
+                            if fill.execution.orderId == order_id:
+                                if shares_sold == 0:
                                     shares_sold = int(fill.execution.shares) if hasattr(fill.execution, 'shares') else shares_sold
-                                    logger.info(f"✅ Bot {bot_id}: Got filled quantity {shares_sold} from IBKR fills for order {order_id}")
+                                # Get fill price - try avgPrice first, then price
+                                if fill_price is None:
+                                    fill_price = (getattr(fill.execution, 'avgPrice', None) or 
+                                                 getattr(fill.execution, 'price', None) or
+                                                 getattr(fill, 'avgFillPrice', None) or
+                                                 getattr(fill, 'fillPrice', None))
+                                    if fill_price:
+                                        logger.info(f"✅ Bot {bot_id}: Got fill price ${fill_price:.6f} from IBKR fills for order {order_id}")
+                                if shares_sold > 0 and fill_price:
                                     break
-                            except (AttributeError, ValueError):
-                                continue
-                    except Exception as e:
-                        logger.warning(f"⚠️ Bot {bot_id}: Could not get filled quantity from IBKR: {e}")
+                        except (AttributeError, ValueError) as e:
+                            logger.debug(f"⚠️ Bot {bot_id}: Error extracting fill data: {e}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"⚠️ Bot {bot_id}: Could not get filled quantity/price from IBKR: {e}")
                 
                 # If still 0, try to infer from bot state (calculate from shares_exited change)
                 if shares_sold == 0:
@@ -1033,8 +1074,23 @@ class BotService:
                     logger.warning(f"⚠️ Bot {bot_id}: Could not determine filled quantity for order {order_id}, using stored quantity or defaulting to 1")
                     shares_sold = order_info.get('quantity', 1)  # Default to 1 if all else fails
                 
-                exit_line_price = order_info.get('price', 0)
                 line_id = order_info.get('line_id', '')
+                exit_line_price = order_info.get('price', 0)
+                
+                # If exit_line_price is 0 or missing, try to get it from the exit line itself
+                if exit_line_price == 0 and line_id:
+                    exit_lines = bot_state.get('exit_lines', [])
+                    for exit_line in exit_lines:
+                        if exit_line.get('id') == line_id:
+                            exit_line_price = exit_line.get('price', 0)
+                            logger.info(f"✅ Bot {bot_id}: Got exit line price ${exit_line_price:.6f} from exit line {line_id}")
+                            break
+                
+                # If still 0, use current_price as fallback
+                if exit_line_price == 0:
+                    exit_line_price = current_price
+                    logger.warning(f"⚠️ Bot {bot_id}: Exit line price is 0, using current_price ${current_price:.6f} as fallback")
+                
                 bot_state['shares_exited'] += shares_sold
                 bot_state['open_shares'] -= shares_sold
                 order_info['status'] = 'FILLED'
@@ -1059,6 +1115,9 @@ class BotService:
                     db_update['filled_exit_lines'] = filled_lines_str
                 await self._update_bot_in_db(bot_id, db_update)
                 
+                # Determine the price to log - prefer actual fill price, then line price, then current price
+                logged_price = fill_price if fill_price else (exit_line_price if exit_line_price else current_price)
+                
                 # Log exit order filled event (so frontend shows the exit order as filled)
                 trend_strategy = bot_state.get('trend_strategy', 'uptrend')
                 event_type = 'options_exit_limit_order' if trend_strategy == 'downtrend' else 'spot_exit_limit_order'
@@ -1066,6 +1125,8 @@ class BotService:
                 await self._log_bot_event(bot_id, event_type, {
                     'line_price': exit_line_price,
                     'current_price': current_price,
+                    'fill_price': fill_price,  # Actual fill price from IBKR
+                    'price': logged_price,  # Price to display (prefer fill_price)
                     'shares_to_sell': shares_sold,
                     'quantity': shares_sold,  # Also include as 'quantity' for consistency
                     'order_id': order_id,
@@ -1621,6 +1682,8 @@ class BotService:
                             await self._log_bot_event(bot_id, event_type, {
                                 'line_price': log_price,
                                 'current_price': current_price,
+                                'fill_price': log_price,  # For immediate fills, use line price as fill price
+                                'price': log_price,  # Price to display
                                 'shares_to_sell': shares_to_sell,
                                 'quantity': shares_to_sell,  # Also include as 'quantity' for consistency
                                 'order_id': order_id,
@@ -2253,11 +2316,40 @@ class BotService:
                     'entry_order_status': 'FILLED'
                 })
                 
+                # Try to get fill price from IBKR fills for market orders
+                fill_price = None
+                try:
+                    from app.utils.ib_client import ib_client
+                    await ib_client.ensure_connected()
+                    fills = ib_client.ib.fills()
+                    for fill in fills:
+                        try:
+                            if fill.execution.orderId == trade.order.orderId:
+                                fill_price = (getattr(fill.execution, 'avgPrice', None) or 
+                                             getattr(fill.execution, 'price', None) or
+                                             getattr(fill, 'avgFillPrice', None) or
+                                             getattr(fill, 'fillPrice', None))
+                                if fill_price:
+                                    logger.info(f"✅ Bot {bot_id}: Got entry fill price ${fill_price:.6f} from IBKR fills for order {trade.order.orderId}")
+                                    # Update entry_price with actual fill price if available
+                                    bot_state['entry_price'] = fill_price
+                                break
+                        except (AttributeError, ValueError):
+                            continue
+                except Exception as e:
+                    logger.debug(f"⚠️ Bot {bot_id}: Could not get entry fill price from IBKR (may not be available yet): {e}")
+                
+                # Determine the price to log - prefer actual fill price, then current_price
+                logged_price = fill_price if fill_price else current_price
+                
                 # Log entry order event
                 await self._log_bot_event(bot_id, 'spot_entry_market_order', {
                     'line_price': line.get('price', current_price),
                     'current_price': current_price,
+                    'fill_price': fill_price,  # Actual fill price from IBKR
+                    'price': logged_price,  # Price to display (prefer fill_price)
                     'shares_bought': shares_to_buy,
+                    'quantity': shares_to_buy,  # Also include as 'quantity' for consistency
                     'order_id': trade.order.orderId,
                     'order_status': 'FILLED',
                     'strategy': 'uptrend_spot_market'
@@ -3922,10 +4014,37 @@ class BotService:
                     all_order_ids_list.append(str(entry_order_2))
                 
                 # Log entry order event for this buy order
+                # Try to get fill price from IBKR fills for market orders
+                fill_price = None
+                try:
+                    from app.utils.ib_client import ib_client
+                    await ib_client.ensure_connected()
+                    fills = ib_client.ib.fills()
+                    for fill in fills:
+                        try:
+                            if fill.execution.orderId == trade.order.orderId:
+                                fill_price = (getattr(fill.execution, 'avgPrice', None) or 
+                                             getattr(fill.execution, 'price', None) or
+                                             getattr(fill, 'avgFillPrice', None) or
+                                             getattr(fill, 'fillPrice', None))
+                                if fill_price:
+                                    logger.info(f"✅ Bot {bot_id}: Got multi-buy entry fill price ${fill_price:.6f} from IBKR fills for order {trade.order.orderId}")
+                                break
+                        except (AttributeError, ValueError):
+                            continue
+                except Exception as e:
+                    logger.debug(f"⚠️ Bot {bot_id}: Could not get multi-buy entry fill price from IBKR (may not be available yet): {e}")
+                
+                # Determine the price to log - prefer actual fill price, then current_price
+                logged_price = fill_price if fill_price else current_price
+                
                 await self._log_bot_event(bot_id, 'spot_entry_market_order', {
                     'line_price': line.get('price', current_price),
                     'current_price': current_price,
+                    'fill_price': fill_price,  # Actual fill price from IBKR
+                    'price': logged_price,  # Price to display (prefer fill_price)
                     'shares_bought': shares_to_buy,
+                    'quantity': shares_to_buy,  # Also include as 'quantity' for consistency
                     'order_id': trade.order.orderId,
                     'order_status': 'FILLED',
                     'line_identifier': line_identifier,

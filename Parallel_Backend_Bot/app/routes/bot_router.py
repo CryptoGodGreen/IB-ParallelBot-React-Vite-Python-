@@ -500,13 +500,21 @@ async def get_all_bots_trade_history(
                                 quantity = (event_data.get("quantity") or 
                                            event_data.get("shares_bought") or 
                                            event_data.get("shares_filled") or 0)
+                                
+                                # Get price - prefer fill_price, then price, then line_price, then entry_price, then current_price
+                                fill_price = event_data.get("fill_price") or event_data.get("price")
+                                if not fill_price or fill_price == 0:
+                                    fill_price = (event_data.get("line_price") or 
+                                                 event_data.get("entry_price") or 
+                                                 event_data.get("current_price") or 0.0)
+                                
                                 bot_trade_history.append({
                                     "side": "BUY",
                                     "filled": "Yes" if event_data.get("order_status", "").upper() == "FILLED" else "Pending",
                                     "target": event_data.get("target", "Entry"),
                                     "filled_at": event.timestamp.isoformat() if event.timestamp else None,
                                     "shares_filled": quantity,
-                                    "price": event_data.get("price", 0.0),
+                                    "price": fill_price,
                                     "order_id": order_id,
                                     "event_type": event.event_type,
                                     "bot_id": bot.id,
@@ -528,13 +536,19 @@ async def get_all_bots_trade_history(
                                        event_data.get("shares_sold") or 
                                        event_data.get("contracts_sold") or 
                                        event_data.get("shares_filled") or 0)
+                            
+                            # Get price - prefer fill_price, then price, then line_price, then current_price
+                            fill_price = event_data.get("fill_price") or event_data.get("price")
+                            if not fill_price or fill_price == 0:
+                                fill_price = event_data.get("line_price") or event_data.get("current_price") or 0.0
+                            
                             bot_trade_history.append({
                                 "side": "SELL",
                                 "filled": "Yes" if event_data.get("order_status", "").upper() == "FILLED" else "Pending",
                                 "target": event_data.get("target", "Exit"),
                                 "filled_at": event.timestamp.isoformat() if event.timestamp else None,
                                 "shares_filled": quantity,
-                                "price": event_data.get("price", 0.0),
+                                "price": fill_price,
                                 "order_id": order_id,
                                 "event_type": event.event_type,
                                 "bot_id": bot.id,
@@ -698,13 +712,21 @@ async def get_bot_trade_history(
                             target_label = "Entry"
                         # Get quantity - use 'quantity' field if available, otherwise fall back to 'shares_bought'
                         quantity = event_data.get("quantity") or event_data.get("shares_bought", 0)
+                        
+                        # Get price - prefer fill_price, then price, then line_price, then entry_price, then current_price
+                        fill_price = event_data.get("fill_price") or event_data.get("price")
+                        if not fill_price or fill_price == 0:
+                            fill_price = (event_data.get("line_price") or 
+                                         event_data.get("entry_price") or 
+                                         event_data.get("current_price") or 0)
+                        
                         trade_history.append({
                             "side": "BUY",
                             "filled": "Yes",
                             "target": target_label,
                             "filled_at": event.timestamp.isoformat() if event.timestamp else None,
                             "shares_filled": quantity,
-                            "price": event_data.get("line_price", event_data.get("entry_price", 0)),
+                            "price": fill_price,
                             "order_id": order_id,
                             "event_type": event.event_type
                         })
@@ -766,6 +788,41 @@ async def get_bot_trade_history(
                     
                     if order_status == "FILLED":
                         # Exit order filled - always include filled orders
+                        # Get price - use EXACT same logic as all_bots endpoint
+                        # But be more explicit about handling None/missing values
+                        fill_price = event_data.get("fill_price")
+                        if fill_price is None:
+                            fill_price = event_data.get("price")
+                        if fill_price is None or fill_price == 0:
+                            fill_price = event_data.get("line_price")
+                        if fill_price is None or fill_price == 0:
+                            fill_price = event_data.get("current_price")
+                        if fill_price is None or fill_price == 0:
+                            fill_price = 0.0
+                        
+                        # Convert to float if needed (JSON might store as string or Decimal)
+                        try:
+                            fill_price = float(fill_price) if fill_price is not None else 0.0
+                        except (ValueError, TypeError):
+                            fill_price = 0.0
+                        
+                        # Debug logging for price extraction
+                        logger.info(f"🔍 Bot {bot_id} Exit order {order_id} (line {line_id}): "
+                                  f"fill_price={event_data.get('fill_price')}, price={event_data.get('price')}, "
+                                  f"line_price={event_data.get('line_price')}, current_price={event_data.get('current_price')}, "
+                                  f"final={fill_price}")
+                        
+                        # If still 0, try to get price from exit line in database
+                        if fill_price == 0 and line_id:
+                            # Try to find the exit line and get its price
+                            for exit_line in exit_lines:
+                                if str(exit_line.id) == str(line_id) or exit_line.id == line_id:
+                                    line_price = float(exit_line.price) if exit_line.price else None
+                                    if line_price and line_price > 0:
+                                        fill_price = line_price
+                                        logger.info(f"✅ Got exit line price ${fill_price:.6f} from database for line {line_id}")
+                                        break
+                        
                         if exit_key not in included_exit_orders:
                             trade_entry = {
                                 "side": "SELL",
@@ -773,7 +830,7 @@ async def get_bot_trade_history(
                                 "target": target_label,
                                 "filled_at": event.timestamp.isoformat() if event.timestamp else None,
                                 "shares_filled": quantity,
-                                "price": event_data.get("line_price", 0),
+                                "price": fill_price,
                                 "order_id": order_id,
                                 "event_type": event.event_type
                             }
@@ -781,16 +838,28 @@ async def get_bot_trade_history(
                             included_exit_orders[exit_key] = trade_entry
                             if order_id:
                                 included_order_ids.add(order_id)
+                            logger.info(f"✅ Added SELL order {order_id} with price={fill_price}")
+                        else:
+                            # Update existing entry if this event has a better price (non-zero)
+                            existing_entry = included_exit_orders[exit_key]
+                            if fill_price > 0 and (existing_entry.get("price", 0) == 0 or existing_entry.get("price", 0) is None):
+                                existing_entry["price"] = fill_price
+                                logger.info(f"✅ Updated exit order {order_id} price from {existing_entry.get('price')} to {fill_price}")
                     elif order_status == "CANCELLED":
                         # Exit order cancelled - show as CANCELLED
                         if exit_key not in included_exit_orders:
+                            # Get price - prefer fill_price, then price, then line_price, then current_price
+                            fill_price = event_data.get("fill_price") or event_data.get("price")
+                            if not fill_price or fill_price == 0:
+                                fill_price = event_data.get("line_price") or event_data.get("current_price") or 0
+                            
                             trade_entry = {
                                 "side": "SELL",
                                 "filled": "Cancelled",
                                 "target": target_label,
                                 "filled_at": event.timestamp.isoformat() if event.timestamp else None,
                                 "shares_filled": quantity,
-                                "price": event_data.get("line_price", 0),
+                                "price": fill_price,
                                 "order_id": order_id,
                                 "event_type": event.event_type
                             }
@@ -806,13 +875,18 @@ async def get_bot_trade_history(
                     else:
                         # Exit order pending - only keep the most recent pending order for each (order_id, line_id)
                         if exit_key and exit_key not in included_exit_orders:
+                            # Get price - prefer fill_price, then price, then line_price, then current_price
+                            fill_price = event_data.get("fill_price") or event_data.get("price")
+                            if not fill_price or fill_price == 0:
+                                fill_price = event_data.get("line_price") or event_data.get("current_price") or 0
+                            
                             trade_entry = {
                                 "side": "SELL",
                                 "filled": "Pending",
                                 "target": target_label,
                                 "filled_at": None,
                                 "shares_filled": quantity,
-                                "price": event_data.get("line_price", 0),
+                                "price": fill_price,
                                 "order_id": order_id,
                                 "event_type": event.event_type
                             }
@@ -825,21 +899,41 @@ async def get_bot_trade_history(
                             existing_entry = included_exit_orders[exit_key]
                             # Only update if current status is Pending (don't overwrite FILLED or CANCELLED)
                             if existing_entry.get("filled") == "Pending":
-                                # Update with more recent pending order data
+                                # Update with more recent pending order data - use same price logic
                                 existing_entry["shares_filled"] = quantity
-                                existing_entry["price"] = event_data.get("line_price", 0)
+                                fill_price = event_data.get("fill_price") or event_data.get("price")
+                                if not fill_price or fill_price == 0:
+                                    fill_price = event_data.get("line_price") or event_data.get("current_price") or 0.0
+                                existing_entry["price"] = fill_price
                                 existing_entry["order_id"] = order_id
                 elif event.event_type == "spot_position_partial_exit":
                     # Legacy event type - prefer spot_exit_limit_order if available
                     # Only add if we don't already have the exit order from spot_exit_limit_order
                     if order_id not in included_order_ids:
+                        # Get price - use same logic as exit orders
+                        fill_price = event_data.get("fill_price")
+                        if fill_price is None:
+                            fill_price = event_data.get("price")
+                        if fill_price is None or fill_price == 0:
+                            fill_price = event_data.get("line_price")
+                        if fill_price is None or fill_price == 0:
+                            fill_price = event_data.get("current_price")
+                        if fill_price is None or fill_price == 0:
+                            fill_price = event_data.get("exit_price", 0.0)
+                        
+                        # Convert to float if needed
+                        try:
+                            fill_price = float(fill_price) if fill_price is not None else 0.0
+                        except (ValueError, TypeError):
+                            fill_price = 0.0
+                        
                         trade_history.append({
                             "side": "SELL",
                             "filled": "Yes",
                             "target": "Exit",
                             "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                            "shares_filled": event_data.get("shares_sold", 0),
-                            "price": event_data.get("exit_price", 0),
+                            "shares_filled": event_data.get("shares_sold", event_data.get("quantity", 0)),
+                            "price": fill_price,
                             "order_id": order_id,
                             "event_type": event.event_type
                         })
@@ -847,13 +941,30 @@ async def get_bot_trade_history(
                             included_order_ids.add(order_id)
                 elif event.event_type == "options_position_partial_exit":
                     # Options exit
+                    # Get price - use same logic as exit orders
+                    fill_price = event_data.get("fill_price")
+                    if fill_price is None:
+                        fill_price = event_data.get("price")
+                    if fill_price is None or fill_price == 0:
+                        fill_price = event_data.get("line_price")
+                    if fill_price is None or fill_price == 0:
+                        fill_price = event_data.get("current_price")
+                    if fill_price is None or fill_price == 0:
+                        fill_price = event_data.get("exit_price", 0.0)
+                    
+                    # Convert to float if needed
+                    try:
+                        fill_price = float(fill_price) if fill_price is not None else 0.0
+                    except (ValueError, TypeError):
+                        fill_price = 0.0
+                    
                     trade_history.append({
                         "side": "SELL",
                         "filled": "Yes",
                         "target": "Exit (Option)",
                         "filled_at": event.timestamp.isoformat() if event.timestamp else None,
-                        "shares_filled": event_data.get("contracts_sold", 0),  # Contracts for options
-                        "price": event_data.get("exit_price", 0),
+                        "shares_filled": event_data.get("contracts_sold", event_data.get("quantity", 0)),  # Contracts for options
+                        "price": fill_price,
                         "order_id": order_id,
                         "event_type": event.event_type
                     })

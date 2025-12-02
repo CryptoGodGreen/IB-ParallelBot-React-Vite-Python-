@@ -789,7 +789,7 @@ const BotConfigPanel = ({
                       </td>
                       <td>{trade.target}</td>
                       <td>
-                        {trade.price ? `$${trade.price.toFixed(2)}` : '-'}
+                        {trade.price && trade.price > 0 ? `$${trade.price.toFixed(2)}` : '-'}
                       </td>
                       <td>
                         {trade.filled_at ? 
