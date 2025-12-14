@@ -1,6 +1,8 @@
 // UDF-compatible datafeed for TradingView Charting Library
 // This implements the Universal Data Feed interface
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 const configuration = {
   supports_search: false,
   supports_group_request: false,
@@ -157,8 +159,8 @@ class Datafeed {
       console.log('🔧 Dates:', new Date(fromTimestamp * 1000), 'to', new Date(toTimestamp * 1000));
       
       // Call our backend UDF endpoint
-      const backendUrl = `http://localhost:8000/udf/history?symbol=${symbolInfo.name}&from_timestamp=${fromTimestamp}&to_timestamp=${toTimestamp}&resolution=${resolution}`;
-      
+      const backendUrl = `${API_BASE_URL}/udf/history?symbol=${symbolInfo.name}&from_timestamp=${fromTimestamp}&to_timestamp=${toTimestamp}&resolution=${resolution}`;
+
       console.log('🌐 Fetching from our backend:', backendUrl);
       
       const response = await fetch(backendUrl);
@@ -222,8 +224,8 @@ class Datafeed {
         const now = Math.floor(Date.now() / 1000);
         const fromTimestamp = now - 300; // 5 minutes ago
         
-        const backendUrl = `http://localhost:8000/udf/history?symbol=${symbolInfo.name}&from_timestamp=${fromTimestamp}&to_timestamp=${now}&resolution=${resolution}`;
-        
+        const backendUrl = `${API_BASE_URL}/udf/history?symbol=${symbolInfo.name}&from_timestamp=${fromTimestamp}&to_timestamp=${now}&resolution=${resolution}`;
+
         const response = await fetch(backendUrl);
         const data = await response.json();
         

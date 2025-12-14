@@ -76,20 +76,38 @@ async def startup():
     async with AsyncSessionLocal() as db:
         await seed_admin(db)
     
-    # Try to connect to IBKR (don't fail if unavailable)
-    try:
-        await ib_client.connect()
-        logging.getLogger(__name__).info("✅ IBKR connection established on startup")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"⚠️ IBKR connection failed on startup: {e}")
-        logging.getLogger(__name__).warning("📌 Make sure TWS/IB Gateway is running with API enabled")
+    # IB Gateway connection with retry (handles timing race condition during container startup)
+    max_attempts = 10
+    backoff = 4.0  # Start at 4 seconds
 
-    # Start streaming service (like Ruby IBServer)
-    try:
-        await streaming_service.start()
-        logging.getLogger(__name__).info("📡 Streaming service started")
-    except Exception as e:
-        logging.getLogger(__name__).error(f"❌ Failed to start streaming service: {e}")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await ib_client.connect()
+            logging.getLogger(__name__).info(f"✅ IBKR connection established on startup (attempt {attempt})")
+            break
+        except Exception as e:
+            if attempt < max_attempts:
+                logging.getLogger(__name__).warning(
+                    f"⚠️ IBKR connection attempt {attempt}/{max_attempts} failed: {e}. "
+                    f"Retrying in {backoff}s..."
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 1.5, 30)  # Exponential backoff, max 30s
+            else:
+                logging.getLogger(__name__).error(
+                    f"❌ IBKR connection failed after {max_attempts} attempts. "
+                    f"Gateway may not be ready. Will retry on first API request."
+                )
+
+    # Start streaming service (only if connected)
+    if ib_client.ib.isConnected():
+        try:
+            await streaming_service.start()
+            logging.getLogger(__name__).info("📡 Streaming service started")
+        except Exception as e:
+            logging.getLogger(__name__).error(f"❌ Failed to start streaming service: {e}")
+    else:
+        logging.getLogger(__name__).warning("⚠️ Streaming service not started (no IB connection)")
 
     # Start bot service
     try:

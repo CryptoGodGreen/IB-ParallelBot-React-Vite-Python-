@@ -4,6 +4,8 @@ import ErrorBoundary from '../common/ErrorBoundary';
 import chartService from '../../services/chartService';
 import tradingService from '../../services/trading/TradingService.js';
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onSaveRequested }) => {
   const { symbol } = useParams();
   const containerRef = useRef(null);
@@ -1128,7 +1130,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
 
           searchSymbols: (userInput, exchange, symbolType, onResultReadyCallback) => {
             console.log('[searchSymbols]: Method called');
-            fetch(`http://localhost:8000/udf/search?query=${userInput}&limit=50`)
+            fetch(`${API_BASE_URL}/udf/search?query=${userInput}&limit=50`)
               .then(response => response.json())
               .then(data => onResultReadyCallback(data))
               .catch(() => onResultReadyCallback([]));
@@ -1136,8 +1138,8 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
 
           resolveSymbol: (symbolName, onSymbolResolvedCallback, onResolveErrorCallback) => {
             console.log('[resolveSymbol]: Method called', symbolName);
-            
-            fetch(`http://localhost:8000/udf/symbol?symbol=${symbolName}`)
+
+            fetch(`${API_BASE_URL}/udf/symbol?symbol=${symbolName}`)
               .then(response => response.json())
               .then(data => {
                 const symbolInfo = {
@@ -1212,8 +1214,8 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
             
             // Use countback if provided and reasonable (for bar count requests)
             const countbackParam = countBack && countBack > 0 && countBack <= 500 ? `&countback=${countBack}` : '';
-            
-            fetch(`http://localhost:8000/udf/history?symbol=${symbolInfo.name}&from_timestamp=${Math.floor(adjustedFrom)}&to_timestamp=${Math.floor(adjustedTo)}&resolution=${resolution}${countbackParam}`)
+
+            fetch(`${API_BASE_URL}/udf/history?symbol=${symbolInfo.name}&from_timestamp=${Math.floor(adjustedFrom)}&to_timestamp=${Math.floor(adjustedTo)}&resolution=${resolution}${countbackParam}`)
               .then(response => {
                 if (!response.ok) {
                   throw new Error(`HTTP ${response.status}`);
@@ -1362,7 +1364,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                 }
                 
                 const response = await fetch(
-                  `http://localhost:8000/udf/history?symbol=${symbolInfo.name}&from_timestamp=${from}&to_timestamp=${to}&resolution=${resolution}&countback=${countback}`
+                  `${API_BASE_URL}/udf/history?symbol=${symbolInfo.name}&from_timestamp=${from}&to_timestamp=${to}&resolution=${resolution}&countback=${countback}`
                 );
                 
                 if (!response.ok) {

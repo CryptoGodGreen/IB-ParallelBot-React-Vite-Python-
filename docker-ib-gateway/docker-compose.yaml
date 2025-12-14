@@ -1,0 +1,136 @@
+version: "3.9"
+
+services:
+  # IB Gateway service (with credential injection)
+  gateway:
+    build:
+      context: ./gateway
+      args:
+        CHANNEL: ${IB_GATEWAY_RELEASE_CHANNEL}
+    image: ib-gateway-local
+    container_name: ib-gateway
+    volumes:
+      - ./gateway/config.ini:/opt/ibc/config.ini.template
+      - ./gateway/scripts/gatewaystart.sh:/opt/ibc/gatewaystart.sh
+      - ./gateway/scripts/inject_credentials.sh:/opt/ibc/scripts/inject_credentials.sh
+    environment:
+      - VNC_SERVER_PASSWORD=${VNC_SERVER_PASSWORD}
+      - IB_USERNAME=${IB_USERNAME}
+      - IB_PASSWORD=${IB_PASSWORD}
+      - TRADING_MODE=${TRADING_MODE}
+    restart: unless-stopped
+    stop_signal: SIGKILL
+    ports:
+      - "5900:5900"   # VNC
+      - "4001:4001"   # Live Trading API (localhost only)
+      - "4002:4002"   # Paper Trading API (localhost only)
+      - "4003:4003"   # Paper Trading API (proxied via socat for container access)
+      - "4004:4004"   # Live Trading API (proxied via socat for container access)
+      - "8080:8080"   # Health check
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/4002' 2>/dev/null || timeout 2 bash -c 'echo > /dev/tcp/localhost/4001' 2>/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    networks:
+      appnet:
+        ipv4_address: 172.25.0.5
+
+  # PostgreSQL database
+  postgres:
+    image: postgres:15.3-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      appnet:
+        ipv4_address: 172.25.0.10
+
+  # Redis cache
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      appnet:
+        ipv4_address: 172.25.0.11
+
+  # FastAPI Backend Bot
+  fastapi-app:
+    build:
+      context: ../Parallel_Backend_Bot
+      dockerfile: Dockerfile
+    container_name: fastapi-app
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - IB_HOST=gateway
+      - IB_PORT=${IB_PORT}
+      - IB_CLIENT_ID=${IB_CLIENT_ID}
+      - IB_RTH_DEFAULT=${IB_RTH_DEFAULT}
+      - IB_CONNECT_TIMEOUT=${IB_CONNECT_TIMEOUT}
+      - IB_RECONNECT_BACKOFF_SECONDS=${IB_RECONNECT_BACKOFF_SECONDS}
+      - IB_MARKETDATA_DELAY=${IB_MARKETDATA_DELAY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - SQL_LOG_LEVEL=${SQL_LOG_LEVEL}
+      - LOG_FORMAT=${LOG_FORMAT}
+    ports:
+      - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      appnet:
+        ipv4_address: 172.25.0.20
+
+volumes:
+  pgdata:
+
+networks:
+  appnet:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-trading
+      com.docker.network.driver.mtu: 1500
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.0.0/16

@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import "./Report.css";
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 const Report = () => {
   const [tradeHistory, setTradeHistory] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -15,7 +17,7 @@ const Report = () => {
       setLoading(true);
       setError(null);
       
-      const response = await fetch("http://localhost:8000/bots/all/trade-history", {
+      const response = await fetch(`${API_BASE_URL}/bots/all/trade-history`, {
         headers: {
           Authorization: `Bearer ${localStorage.getItem("token")}`,
         },

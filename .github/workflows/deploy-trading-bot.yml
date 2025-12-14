@@ -1,0 +1,535 @@
+name: Deploy Trading Bot to VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      trading_mode:
+        description: 'Select Trading Mode'
+        required: true
+        type: choice
+        options:
+          - paper
+          - live
+        default: paper
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Reference the production environment to access environment secrets
+    environment: production
+
+    # Explicitly grant permissions to access secrets
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Validate Trading Mode
+        run: |
+          if [[ "${{ github.event.inputs.trading_mode }}" != "paper" && "${{ github.event.inputs.trading_mode }}" != "live" ]]; then
+            echo "Invalid trading mode: ${{ github.event.inputs.trading_mode }}"
+            exit 1
+          fi
+          echo "✅ Deploying in ${{ github.event.inputs.trading_mode }} mode"
+
+      - name: Validate Required Secrets
+        run: |
+          echo "🔍 Validating all required GitHub Secrets..."
+          echo ""
+
+          MISSING_SECRETS=()
+
+          # Check VPS connection secrets
+          if [ -z "${{ secrets.VPS_HOST }}" ]; then
+            echo "❌ VPS_HOST is missing"
+            MISSING_SECRETS+=("VPS_HOST")
+          else
+            echo "✅ VPS_HOST is set: ${{ secrets.VPS_HOST }}"
+          fi
+
+          if [ -z "${{ secrets.VPS_SSH_USER }}" ]; then
+            echo "❌ VPS_SSH_USER is missing"
+            MISSING_SECRETS+=("VPS_SSH_USER")
+          else
+            echo "✅ VPS_SSH_USER is set: ${{ secrets.VPS_SSH_USER }}"
+          fi
+
+          if [ -z "${{ secrets.VPS_SSH_PRIVATE_KEY }}" ]; then
+            echo "❌ VPS_SSH_PRIVATE_KEY is missing"
+            MISSING_SECRETS+=("VPS_SSH_PRIVATE_KEY")
+          else
+            echo "✅ VPS_SSH_PRIVATE_KEY is set (length: $(echo -n '${{ secrets.VPS_SSH_PRIVATE_KEY }}' | wc -c) chars)"
+          fi
+
+          # Check IB credentials
+          if [ -z "${{ secrets.IB_USERNAME }}" ]; then
+            echo "❌ IB_USERNAME is missing"
+            MISSING_SECRETS+=("IB_USERNAME")
+          else
+            echo "✅ IB_USERNAME is set"
+          fi
+
+          if [ -z "${{ secrets.IB_PASSWORD }}" ]; then
+            echo "❌ IB_PASSWORD is missing"
+            MISSING_SECRETS+=("IB_PASSWORD")
+          else
+            echo "✅ IB_PASSWORD is set"
+          fi
+
+          if [ -z "${{ secrets.VNC_SERVER_PASSWORD }}" ]; then
+            echo "❌ VNC_SERVER_PASSWORD is missing"
+            MISSING_SECRETS+=("VNC_SERVER_PASSWORD")
+          else
+            echo "✅ VNC_SERVER_PASSWORD is set"
+          fi
+
+          # Check database credentials
+          if [ -z "${{ secrets.POSTGRES_USER }}" ]; then
+            echo "❌ POSTGRES_USER is missing"
+            MISSING_SECRETS+=("POSTGRES_USER")
+          else
+            echo "✅ POSTGRES_USER is set"
+          fi
+
+          if [ -z "${{ secrets.POSTGRES_PASSWORD }}" ]; then
+            echo "❌ POSTGRES_PASSWORD is missing"
+            MISSING_SECRETS+=("POSTGRES_PASSWORD")
+          else
+            echo "✅ POSTGRES_PASSWORD is set"
+          fi
+
+          if [ -z "${{ secrets.POSTGRES_DB }}" ]; then
+            echo "❌ POSTGRES_DB is missing"
+            MISSING_SECRETS+=("POSTGRES_DB")
+          else
+            echo "✅ POSTGRES_DB is set"
+          fi
+
+          # Check JWT secret
+          if [ -z "${{ secrets.JWT_SECRET_KEY }}" ]; then
+            echo "❌ JWT_SECRET_KEY is missing"
+            MISSING_SECRETS+=("JWT_SECRET_KEY")
+          else
+            echo "✅ JWT_SECRET_KEY is set"
+          fi
+
+          # Check for live mode specific secrets
+          if [[ "${{ github.event.inputs.trading_mode }}" == "live" ]]; then
+            if [ -z "${{ secrets.IB_TWOFA_SECRET }}" ]; then
+              echo "⚠️  WARNING: IB_TWOFA_SECRET is missing (required for live trading)"
+              MISSING_SECRETS+=("IB_TWOFA_SECRET")
+            else
+              echo "✅ IB_TWOFA_SECRET is set (required for live mode)"
+            fi
+          fi
+
+          echo ""
+          echo "========================================="
+
+          # If any secrets are missing, fail with helpful message
+          if [ ${#MISSING_SECRETS[@]} -gt 0 ]; then
+            echo "❌ DEPLOYMENT BLOCKED: Missing required secrets"
+            echo ""
+            echo "Missing secrets (${#MISSING_SECRETS[@]}):"
+            for secret in "${MISSING_SECRETS[@]}"; do
+              echo "  - $secret"
+            done
+            echo ""
+            echo "To add secrets:"
+            echo "  1. Go to GitHub Repository → Settings"
+            echo "  2. Click 'Secrets and variables' → 'Actions'"
+            echo "  3. Click 'New repository secret'"
+            echo "  4. Add each missing secret"
+            echo ""
+            echo "See deployment/.env.template for secret descriptions"
+            exit 1
+          else
+            echo "✅ All required secrets are configured!"
+            echo "========================================="
+          fi
+
+      - name: Setup SSH Key
+        run: |
+          echo "🔑 Setting up SSH key..."
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Write private key to file
+          echo "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # Verify key format
+          if head -1 ~/.ssh/deploy_key | grep -q "BEGIN OPENSSH PRIVATE KEY"; then
+            echo "✅ SSH key format verified (OpenSSH format)"
+          else
+            echo "⚠️  WARNING: Key might not be in OpenSSH format"
+            echo "First line: $(head -1 ~/.ssh/deploy_key)"
+          fi
+
+          # Create SSH config to use this key automatically
+          cat > ~/.ssh/config << EOF
+          Host ${{ secrets.VPS_HOST }}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile ~/.ssh/known_hosts
+          EOF
+          chmod 600 ~/.ssh/config
+
+          echo "✅ SSH key configured"
+
+      - name: Add VPS to Known Hosts
+        run: |
+          echo "🔐 Adding VPS to known hosts..."
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "✅ VPS added to known hosts"
+
+      - name: Test SSH Connection
+        run: |
+          echo "🧪 Testing SSH connection to VPS..."
+          ssh -o ConnectTimeout=10 ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} "echo '✅ SSH connection successful' && uname -a"
+
+      - name: Generate Environment Files
+        run: |
+          # Determine IB_PORT based on trading mode
+          # NOTE: We use socat-proxied ports (4003/4004) because IB Gateway API only listens on 127.0.0.1
+          # Paper: 127.0.0.1:4002 → socat → 0.0.0.0:4003
+          # Live:  127.0.0.1:4001 → socat → 0.0.0.0:4004
+          if [[ "${{ github.event.inputs.trading_mode }}" == "paper" ]]; then
+            IB_PORT=4003  # Proxied paper port
+          else
+            IB_PORT=4004  # Proxied live port
+          fi
+
+          echo "📝 Generating .env files for ${{ github.event.inputs.trading_mode }} mode (IB_PORT: $IB_PORT)"
+
+          # Generate docker-ib-gateway/.env
+          cat > docker-ib-gateway/.env << 'EOF'
+          IB_GATEWAY_RELEASE_CHANNEL=${{ secrets.IB_GATEWAY_RELEASE_CHANNEL || 'stable' }}
+          VNC_SERVER_PASSWORD=${{ secrets.VNC_SERVER_PASSWORD }}
+          IB_USERNAME=${{ secrets.IB_USERNAME }}
+          IB_PASSWORD=${{ secrets.IB_PASSWORD }}
+          TRADING_MODE=${{ github.event.inputs.trading_mode }}
+
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+
+          IB_PORT=IB_PORT_PLACEHOLDER
+          IB_CLIENT_ID=${{ secrets.IB_CLIENT_ID || '42' }}
+          IB_RTH_DEFAULT=${{ secrets.IB_RTH_DEFAULT || 'true' }}
+          IB_CONNECT_TIMEOUT=${{ secrets.IB_CONNECT_TIMEOUT || '6' }}
+          IB_RECONNECT_BACKOFF_SECONDS=${{ secrets.IB_RECONNECT_BACKOFF_SECONDS || '3' }}
+          IB_MARKETDATA_DELAY=${{ secrets.IB_MARKETDATA_DELAY || '1.5' }}
+
+          JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+
+          LOG_LEVEL=${{ secrets.LOG_LEVEL || 'INFO' }}
+          SQL_LOG_LEVEL=${{ secrets.SQL_LOG_LEVEL || 'WARNING' }}
+          LOG_FORMAT=${{ secrets.LOG_FORMAT || 'text' }}
+          EOF
+
+          # Replace IB_PORT placeholder
+          sed -i "s/IB_PORT_PLACEHOLDER/$IB_PORT/g" docker-ib-gateway/.env
+
+          # Add IB_TWOFA_SECRET only for live mode
+          if [[ "${{ github.event.inputs.trading_mode }}" == "live" ]]; then
+            echo "IB_TWOFA_SECRET=${{ secrets.IB_TWOFA_SECRET }}" >> docker-ib-gateway/.env
+          fi
+
+          # Generate Parallel_Backend_Bot/.env
+          cat > Parallel_Backend_Bot/.env << 'EOF'
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+          POSTGRES_HOST=postgres
+          POSTGRES_PORT=5432
+
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+
+          IB_HOST=gateway
+          IB_PORT=IB_PORT_PLACEHOLDER
+          IB_CLIENT_ID=${{ secrets.IB_CLIENT_ID || '42' }}
+          IB_RTH_DEFAULT=${{ secrets.IB_RTH_DEFAULT || 'true' }}
+          IB_CONNECT_TIMEOUT=${{ secrets.IB_CONNECT_TIMEOUT || '6' }}
+          IB_RECONNECT_BACKOFF_SECONDS=${{ secrets.IB_RECONNECT_BACKOFF_SECONDS || '3' }}
+          IB_MARKETDATA_DELAY=${{ secrets.IB_MARKETDATA_DELAY || '1.5' }}
+
+          JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+
+          LOG_LEVEL=${{ secrets.LOG_LEVEL || 'INFO' }}
+          SQL_LOG_LEVEL=${{ secrets.SQL_LOG_LEVEL || 'WARNING' }}
+          LOG_FORMAT=${{ secrets.LOG_FORMAT || 'text' }}
+          EOF
+
+          # Replace IB_PORT placeholder
+          sed -i "s/IB_PORT_PLACEHOLDER/$IB_PORT/g" Parallel_Backend_Bot/.env
+
+          echo "✅ Environment files generated successfully"
+
+      - name: Create Deployment Package
+        run: |
+          echo "📦 Creating deployment package..."
+          mkdir -p deploy_package
+
+          # Copy necessary files
+          cp -r docker-ib-gateway deploy_package/
+          cp -r Parallel_Backend_Bot deploy_package/
+
+          # Copy deployment scripts if they exist
+          if [ -d "deployment" ]; then
+            cp -r deployment deploy_package/
+          fi
+
+          # Create tarball
+          tar -czf deploy.tar.gz deploy_package/
+          echo "✅ Deployment package created ($(du -h deploy.tar.gz | cut -f1))"
+
+      - name: Transfer Files to VPS
+        run: |
+          echo "🚀 Transferring deployment package to VPS..."
+
+          # Generate consistent timestamp for backup
+          BACKUP_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          echo "Backup timestamp: $BACKUP_TIMESTAMP"
+
+          # Ensure parent backup directory exists and create timestamped subdirectory
+          echo "💾 Creating backup of current deployment..."
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} \
+            "mkdir -p /opt/trading-bot-backups/$BACKUP_TIMESTAMP && \
+             if [ -d /opt/trading-bot ]; then \
+               cd /opt && tar -czf /opt/trading-bot-backups/$BACKUP_TIMESTAMP/backup.tar.gz trading-bot/; \
+               echo '✅ Backup created successfully'; \
+             else \
+               echo '⚠️  No existing deployment to backup'; \
+             fi"
+
+          # Transfer new deployment
+          scp deploy.tar.gz ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }}:/tmp/
+
+          # Extract on VPS
+          echo "📂 Extracting deployment package on VPS..."
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} \
+            "cd /tmp && tar -xzf deploy.tar.gz && \
+             rm -rf /opt/trading-bot && \
+             mv deploy_package /opt/trading-bot && \
+             rm deploy.tar.gz"
+
+          echo "✅ Files transferred successfully"
+
+      - name: Deploy Services
+        run: |
+          echo "🐳 Deploying Docker services..."
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
+            set -e
+            cd /opt/trading-bot/docker-ib-gateway
+
+            # Stop existing services gracefully
+            echo "⏸️  Stopping existing services..."
+            docker-compose down --timeout 30 || true
+
+            # Clean up old containers
+            docker container prune -f || true
+
+            # Start services
+            echo "▶️  Starting services..."
+            docker-compose up -d --build
+
+            echo "✅ Services started, waiting for health checks..."
+          ENDSSH
+
+      - name: Health Check - IB Gateway
+        run: |
+          echo "🏥 Checking IB Gateway health..."
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
+            set -e
+
+            for i in {1..30}; do
+              if docker inspect ib-gateway 2>/dev/null | grep -q '"Health".*"healthy"'; then
+                echo "✅ IB Gateway is healthy"
+                exit 0
+              fi
+              echo "⏳ Attempt $i/30: IB Gateway not ready yet..."
+              sleep 10
+            done
+
+            echo "❌ IB Gateway health check failed"
+            docker logs ib-gateway --tail 100
+            exit 1
+          ENDSSH
+
+      - name: Health Check - PostgreSQL
+        run: |
+          echo "🏥 Checking PostgreSQL health..."
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
+            set -e
+
+            for i in {1..15}; do
+              if docker inspect postgres 2>/dev/null | grep -q '"Health".*"healthy"'; then
+                echo "✅ PostgreSQL is healthy"
+                exit 0
+              fi
+              echo "⏳ Attempt $i/15: PostgreSQL not ready yet..."
+              sleep 5
+            done
+
+            echo "❌ PostgreSQL health check failed"
+            docker logs postgres --tail 50
+            exit 1
+          ENDSSH
+
+      - name: Health Check - Redis
+        run: |
+          echo "🏥 Checking Redis health..."
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
+            set -e
+
+            for i in {1..10}; do
+              if docker inspect redis 2>/dev/null | grep -q '"Health".*"healthy"'; then
+                echo "✅ Redis is healthy"
+                exit 0
+              fi
+              echo "⏳ Attempt $i/10: Redis not ready yet..."
+              sleep 3
+            done
+
+            echo "❌ Redis health check failed"
+            docker logs redis --tail 50
+            exit 1
+          ENDSSH
+
+      - name: Health Check - FastAPI Backend
+        run: |
+          echo "🏥 Checking FastAPI health..."
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
+            set -e
+
+            echo "Waiting for FastAPI to initialize (this may take up to 2 minutes)..."
+
+            for i in {1..24}; do
+              # Check if container is running first
+              if ! docker ps | grep -q fastapi-app; then
+                echo "❌ ERROR: fastapi-app container is not running!"
+                echo ""
+                echo "Container status:"
+                docker ps -a | grep fastapi-app || echo "Container not found"
+                echo ""
+                echo "Last 100 lines of container logs:"
+                docker logs fastapi-app --tail 100 2>&1 || echo "Could not retrieve logs"
+                exit 1
+              fi
+
+              # Check health endpoint
+              if curl -f http://localhost:8000/health >/dev/null 2>&1; then
+                echo "✅ FastAPI is healthy and responsive"
+                echo ""
+                echo "Verifying /docs endpoint..."
+                if curl -f http://localhost:8000/docs >/dev/null 2>&1; then
+                  echo "✅ API documentation is accessible"
+                  exit 0
+                fi
+              fi
+
+              echo "⏳ Attempt $i/24: FastAPI not ready yet (waiting 5s)..."
+              sleep 5
+            done
+
+            echo "❌ FastAPI health check failed after 2 minutes"
+            echo ""
+            echo "=== DIAGNOSTIC INFORMATION ==="
+            echo ""
+            echo "Container Status:"
+            docker ps -a | grep fastapi-app
+            echo ""
+            echo "Container Health Status:"
+            docker inspect fastapi-app --format='{{.State.Health.Status}}' 2>/dev/null || echo "No health status available"
+            echo ""
+            echo "Last 150 lines of application logs:"
+            docker logs fastapi-app --tail 150
+            echo ""
+            echo "Environment variables in container:"
+            docker exec fastapi-app env | grep -E '(POSTGRES|REDIS|IB_|JWT)' | sed 's/\(PASSWORD\|SECRET\)=.*/\1=***REDACTED***/'
+            echo ""
+            exit 1
+          ENDSSH
+
+      - name: Verify Deployment
+        run: |
+          echo "📊 Deployment Summary"
+          echo "===================="
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
+            echo "Trading Mode: ${{ github.event.inputs.trading_mode }}"
+            echo ""
+            echo "Running Containers:"
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            echo ""
+            echo "Service Health:"
+            docker inspect ib-gateway postgres redis fastapi-app --format='{{.Name}}: {{.State.Health.Status}}' 2>/dev/null || echo "Health status not available for all services"
+          ENDSSH
+
+      - name: Deployment Success Notification
+        if: success()
+        run: |
+          echo "✅ ============================================"
+          echo "✅ DEPLOYMENT COMPLETED SUCCESSFULLY!"
+          echo "✅ ============================================"
+          echo ""
+          echo "📝 Details:"
+          echo "   - Trading Mode: ${{ github.event.inputs.trading_mode }}"
+          echo "   - Commit: ${{ github.sha }}"
+          echo "   - Branch: ${{ github.ref_name }}"
+          echo "   - Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          echo ""
+          echo "🔗 Access Points:"
+          echo "   - FastAPI: http://${{ secrets.VPS_HOST }}:8000"
+          echo "   - API Docs: http://${{ secrets.VPS_HOST }}:8000/docs"
+          echo ""
+          # Add notification webhook here (Slack, Discord, etc.) if needed
+
+      - name: Rollback on Failure
+        if: failure()
+        run: |
+          echo "❌ ============================================"
+          echo "❌ DEPLOYMENT FAILED - INITIATING ROLLBACK"
+          echo "❌ ============================================"
+
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
+            set -e
+
+            # Stop failed deployment
+            cd /opt/trading-bot/docker-ib-gateway
+            docker-compose down --timeout 30 || true
+
+            # Find latest backup
+            LATEST_BACKUP=$(ls -t /opt/trading-bot-backups/ 2>/dev/null | head -1)
+
+            if [ -n "$LATEST_BACKUP" ] && [ -f "/opt/trading-bot-backups/$LATEST_BACKUP/backup.tar.gz" ]; then
+              echo "🔄 Restoring from backup: $LATEST_BACKUP"
+
+              # Restore backup
+              cd /opt
+              rm -rf trading-bot
+              tar -xzf /opt/trading-bot-backups/$LATEST_BACKUP/backup.tar.gz
+
+              # Restart services
+              cd /opt/trading-bot/docker-ib-gateway
+              docker-compose up -d
+
+              echo "✅ Rollback completed successfully"
+            else
+              echo "⚠️  No backup found for rollback"
+              echo "Manual intervention required on VPS"
+              exit 1
+            fi
+          ENDSSH
+
+          echo ""
+          echo "🔔 Deployment failed but rollback completed."
+          echo "Please check GitHub Actions logs and VPS for details."
+          # Add failure notification webhook here
+          exit 1

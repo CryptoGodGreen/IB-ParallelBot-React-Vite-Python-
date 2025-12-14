@@ -3,6 +3,7 @@ FROM python:3.11-slim
 # Install system packages for timezone handling and other dependencies
 RUN apt-get update && apt-get install -y \
     tzdata \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Set default timezone to avoid issues with ib_async
@@ -12,6 +13,9 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+COPY *.py .
+COPY *.sql .
 
 COPY app ./app
 

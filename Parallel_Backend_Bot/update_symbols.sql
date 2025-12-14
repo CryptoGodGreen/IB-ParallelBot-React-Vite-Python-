@@ -16,6 +16,8 @@ VALUES
     ('SMCI', 'SMCI', 'Super Micro Computer, Inc.', 'Super Micro Computer, Inc. Common Stock', 'SMART', 'USD', 0.01, 1, 100, '0930-1600', 'America/New_York', 'true', 'true', 'true', 'streaming', NOW(), NOW())
 ON CONFLICT (symbol) DO NOTHING;
 
+-- SOFI + SMCI 
+-- tight prices
 -- Verify the changes
 SELECT symbol, name FROM symbol_info ORDER BY symbol;
 

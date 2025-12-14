@@ -3,6 +3,8 @@ import tradingService from '../services/trading/TradingService.js';
 import chartService from '../services/chartService.js';
 import './BotConfigPanel.css';
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 const BotConfigPanel = ({ 
   selectedConfig, 
   onConfigUpdate,
@@ -119,7 +121,7 @@ const BotConfigPanel = ({
   const fetchBackendBotStatus = async (configId) => {
     try {
       console.log('🔍 Fetching bot status for config ID:', configId);
-      const response = await fetch(`http://localhost:8000/bots/list`, {
+      const response = await fetch(`${API_BASE_URL}/bots/list`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`,
         },
@@ -187,7 +189,7 @@ const BotConfigPanel = ({
       // If it's a config ID, find the bot ID first
       if (isConfigId) {
         console.log('📊 Finding bot for config ID:', botIdOrConfigId);
-        const response = await fetch(`http://localhost:8000/bots/list`, {
+        const response = await fetch(`${API_BASE_URL}/bots/list`, {
           headers: {
             'Authorization': `Bearer ${localStorage.getItem('token')}`,
           },
@@ -212,7 +214,7 @@ const BotConfigPanel = ({
       }
       
       console.log('📊 Fetching trade history for bot ID:', botId);
-      const response = await fetch(`http://localhost:8000/bots/${botId}/trade-history`, {
+      const response = await fetch(`${API_BASE_URL}/bots/${botId}/trade-history`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`,
         },

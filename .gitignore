@@ -40,3 +40,14 @@ redisdata/
 *.bak
 .DS_Store
 Thumbs.db
+
+# Environment files with secrets
+.env
+*/.env
+docker-ib-gateway/.env
+Parallel_Backend_Bot/.env
+deployment/.env
+
+# Deployment artifacts
+deploy.tar.gz
+deploy_package/

@@ -3,6 +3,9 @@
  * All bot logic is now handled by the backend
  * This service only manages frontend display and communication
  */
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 export class TradingService {
   constructor() {
     this.isInitialized = false;
@@ -35,7 +38,7 @@ export class TradingService {
    */
   async getBotStatus(configId) {
     try {
-      const response = await fetch(`http://localhost:8000/bots/list`, {
+      const response = await fetch(`${API_BASE_URL}/bots/list`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`,
         }
@@ -64,7 +67,7 @@ export class TradingService {
   async startBot(configId, configData) {
     try {
       // First create the bot if it doesn't exist
-      const createResponse = await fetch(`http://localhost:8000/bots/create`, {
+      const createResponse = await fetch(`${API_BASE_URL}/bots/create`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -91,7 +94,7 @@ export class TradingService {
       }
       
       // Then start the bot
-      const startResponse = await fetch(`http://localhost:8000/bots/${botId}/start`, {
+      const startResponse = await fetch(`${API_BASE_URL}/bots/${botId}/start`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`,
@@ -124,7 +127,7 @@ export class TradingService {
         throw new Error('Bot not found');
       }
       
-      const response = await fetch(`http://localhost:8000/bots/${bot.id}/stop`, {
+      const response = await fetch(`${API_BASE_URL}/bots/${bot.id}/stop`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`,
@@ -158,7 +161,7 @@ export class TradingService {
         throw new Error('Bot not found');
       }
       
-      const response = await fetch(`http://localhost:8000/bots/${bot.id}/lines`, {
+      const response = await fetch(`${API_BASE_URL}/bots/${bot.id}/lines`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
