@@ -32,7 +32,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 180s
+      start_period: 240s
     networks:
       appnet:
         ipv4_address: 172.25.0.5
@@ -116,7 +116,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 300s
     networks:
       appnet:
         ipv4_address: 172.25.0.20

@@ -2,7 +2,7 @@ import logging.config
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import health_router, cache_router, users_router, charts_router, orders_router, bot_router
+from app.routes import health_router, cache_router, users_router, charts_router, orders_router, bot_router, system_router
 from app.routes.bot_config_router import router as bot_config_router
 from app.api.udf import router as udf_router
 from app.db.models import Base
@@ -15,7 +15,6 @@ from app.utils.ib_client import ib_client
 from app.services.streaming_service import streaming_service
 from app.services.bot_service import bot_service
 from app.logging_config import LOGGING_CONFIG
-
 
 logging.config.dictConfig(LOGGING_CONFIG)
 
@@ -64,6 +63,7 @@ app.include_router(orders_router)
 app.include_router(bot_router)
 app.include_router(bot_config_router)
 app.include_router(udf_router)
+app.include_router(system_router)
 
 @app.on_event("startup")
 async def startup():

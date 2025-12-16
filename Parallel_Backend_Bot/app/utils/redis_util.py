@@ -1,5 +1,9 @@
 import redis.asyncio as aioredis
 from app.config import settings
+import time
+
+# Track startup time for uptime calculation
+REDIS_STARTUP_TIME = time.time()
 
 redis = aioredis.Redis(
     host=settings.REDIS_HOST,

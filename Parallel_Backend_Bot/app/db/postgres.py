@@ -2,8 +2,12 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
 import logging
+import time
 
 logger = logging.getLogger(__name__)
+
+# Track startup time for uptime calculation
+POSTGRES_STARTUP_TIME = time.time()
 
 # Use IP address instead of hostname to avoid DNS lookups
 # If running in Docker, resolve the hostname once at startup

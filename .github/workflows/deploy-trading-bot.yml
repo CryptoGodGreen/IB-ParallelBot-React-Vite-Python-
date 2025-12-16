@@ -409,9 +409,15 @@ jobs:
           ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
             set -e
 
-            echo "Waiting for FastAPI to initialize (this may take up to 2 minutes)..."
+            echo "⏳ Waiting for FastAPI to initialize..."
+            echo "   This may take up to 7.5 minutes for full startup:"
+            echo "   - Database initialization: ~20s"
+            echo "   - IB Gateway connection retry (up to 10 attempts): ~200s"
+            echo "   - Service stabilization: ~30s"
+            echo ""
 
-            for i in {1..24}; do
+            # Total wait: 90 attempts × 5s = 450 seconds (7.5 minutes)
+            for i in {1..90}; do
               # Check if container is running first
               if ! docker ps | grep -q fastapi-app; then
                 echo "❌ ERROR: fastapi-app container is not running!"
@@ -419,27 +425,36 @@ jobs:
                 echo "Container status:"
                 docker ps -a | grep fastapi-app || echo "Container not found"
                 echo ""
-                echo "Last 100 lines of container logs:"
-                docker logs fastapi-app --tail 100 2>&1 || echo "Could not retrieve logs"
+                echo "Last 150 lines of container logs:"
+                docker logs fastapi-app --tail 150 2>&1 || echo "Could not retrieve logs"
                 exit 1
               fi
 
+              # Check container health status
+              health_status=$(docker inspect fastapi-app --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+
               # Check health endpoint
-              if curl -f http://localhost:8000/health >/dev/null 2>&1; then
-                echo "✅ FastAPI is healthy and responsive"
+              if curl -f -s http://localhost:8000/health >/dev/null 2>&1; then
+                echo "✅ FastAPI is healthy and responsive (attempt $i, took $((i * 5))s)"
                 echo ""
                 echo "Verifying /docs endpoint..."
-                if curl -f http://localhost:8000/docs >/dev/null 2>&1; then
+                if curl -f -s http://localhost:8000/docs >/dev/null 2>&1; then
                   echo "✅ API documentation is accessible"
+                  echo "✅ Deployment completed successfully in $((i * 5)) seconds"
                   exit 0
                 fi
               fi
 
-              echo "⏳ Attempt $i/24: FastAPI not ready yet (waiting 5s)..."
+              # Progress indicators every 30 seconds
+              if [ $((i % 6)) -eq 0 ]; then
+                elapsed=$((i * 5))
+                echo "⏳ Still waiting... (${elapsed}s elapsed, max 450s) [Container health: $health_status]"
+              fi
+
               sleep 5
             done
 
-            echo "❌ FastAPI health check failed after 2 minutes"
+            echo "❌ FastAPI health check failed after 7.5 minutes"
             echo ""
             echo "=== DIAGNOSTIC INFORMATION ==="
             echo ""
@@ -491,6 +506,61 @@ jobs:
           echo ""
           # Add notification webhook here (Slack, Discord, etc.) if needed
 
+      - name: Collect Diagnostics on Failure
+        if: failure()
+        run: |
+          echo "📋 ============================================"
+          echo "📋 COLLECTING DEPLOYMENT DIAGNOSTICS"
+          echo "📋 ============================================"
+
+          ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
+            set +e  # Don't exit on errors during diagnostic collection
+
+            # Create timestamped diagnostics directory
+            TS=$(date +%Y%m%d-%H%M%S)
+            DIAG_DIR="/tmp/trading-diagnostics-$TS"
+            mkdir -p "$DIAG_DIR"
+
+            echo "Collecting container status..."
+            docker ps -a > "$DIAG_DIR/docker-ps-a.txt"
+
+            echo "Collecting container health statuses..."
+            docker inspect ib-gateway postgres redis fastapi-app --format='{{.Name}}: {{.State.Health.Status}}' > "$DIAG_DIR/health-summary.txt" 2>/dev/null || echo "Failed to get health status" > "$DIAG_DIR/health-summary.txt"
+
+            echo "Collecting full container inspect data..."
+            docker inspect ib-gateway postgres redis fastapi-app > "$DIAG_DIR/docker-inspect.json" 2>/dev/null || echo "Failed to inspect containers" > "$DIAG_DIR/docker-inspect.json"
+
+            echo "Collecting container logs..."
+            docker logs ib-gateway --tail 500 > "$DIAG_DIR/ib-gateway.log" 2>&1 || echo "Failed to collect ib-gateway logs" > "$DIAG_DIR/ib-gateway.log"
+            docker logs postgres --tail 500 > "$DIAG_DIR/postgres.log" 2>&1 || echo "Failed to collect postgres logs" > "$DIAG_DIR/postgres.log"
+            docker logs redis --tail 500 > "$DIAG_DIR/redis.log" 2>&1 || echo "Failed to collect redis logs" > "$DIAG_DIR/redis.log"
+            docker logs fastapi-app --tail 1000 > "$DIAG_DIR/fastapi-app.log" 2>&1 || echo "Failed to collect fastapi-app logs" > "$DIAG_DIR/fastapi-app.log"
+
+            echo "Collecting environment info..."
+            docker exec fastapi-app env | grep -E '(POSTGRES|REDIS|IB_|JWT)' | sed 's/\(PASSWORD\|SECRET\)=.*/\1=***REDACTED***/' > "$DIAG_DIR/env-vars.txt" 2>&1 || echo "Failed to collect env vars" > "$DIAG_DIR/env-vars.txt"
+
+            echo "Creating diagnostics archive..."
+            tar -czf "$DIAG_DIR.tar.gz" -C /tmp "$(basename "$DIAG_DIR")"
+
+            # Output the archive path for the next step
+            echo "$DIAG_DIR.tar.gz"
+          ENDSSH
+
+          echo ""
+          echo "📦 Downloading diagnostics archive from VPS..."
+          scp "${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }}:/tmp/trading-diagnostics-*.tar.gz" . || echo "⚠️ Failed to download diagnostics"
+
+          echo "✅ Diagnostics collection complete"
+
+      - name: Upload Diagnostics Artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-diagnostics
+          path: trading-diagnostics-*.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Rollback on Failure
         if: failure()
         run: |
@@ -500,6 +570,33 @@ jobs:
 
           ssh ${{ secrets.VPS_SSH_USER }}@${{ secrets.VPS_HOST }} << 'ENDSSH'
             set -e
+
+            echo "🔍 Analyzing failure type..."
+            echo ""
+
+            # Check if containers are running
+            GATEWAY_RUNNING=$(docker ps | grep -c ib-gateway || echo 0)
+            FASTAPI_RUNNING=$(docker ps | grep -c fastapi-app || echo 0)
+            POSTGRES_RUNNING=$(docker ps | grep -c postgres || echo 0)
+
+            if [ $GATEWAY_RUNNING -eq 0 ] || [ $POSTGRES_RUNNING -eq 0 ]; then
+              echo "💥 CRITICAL: Core infrastructure services failed to start"
+              echo "   Initiating immediate rollback..."
+            elif [ $FASTAPI_RUNNING -eq 0 ]; then
+              echo "💥 CRITICAL: FastAPI container crashed during startup"
+              echo "   Check diagnostics artifact for crash details"
+              echo "   Initiating immediate rollback..."
+            else
+              echo "⏱️  Containers are running but health checks timed out"
+              echo "   This may indicate:"
+              echo "   - IB Gateway connection issues (check credentials/network)"
+              echo "   - Database migration problems"
+              echo "   - Longer-than-expected startup time"
+              echo ""
+              echo "   Review the diagnostics artifact for details"
+              echo "   Initiating rollback..."
+            fi
+            echo ""
 
             # Stop failed deployment
             cd /opt/trading-bot/docker-ib-gateway
