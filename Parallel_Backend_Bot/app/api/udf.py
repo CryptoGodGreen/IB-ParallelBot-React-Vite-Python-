@@ -333,43 +333,55 @@ async def get_history(
         
         bar_size = resolution_map.get(resolution, '1 day')
         
-        # Calculate duration based on time range and resolution
+        # Calculate duration based on how far back we need to go from to_timestamp
+        # IBKR returns data going back from endDateTime by the duration
+        # So we need duration to cover from_timestamp to to_timestamp
         time_diff = to_timestamp - from_timestamp
         days_diff = time_diff / 86400  # Convert seconds to days
         
-        # Return ONLY what was requested (with small buffer) to enable pagination
-        # This ensures TradingView will request more data when panning
+        # Calculate how many days back from to_timestamp we need to go
+        # Add a small buffer (10%) to ensure we get enough data
+        days_back = days_diff * 1.1
+        
+        # Determine duration based on how far back we need to go
+        # IBKR duration options: "1 D", "2 D", "1 W", "1 M", "3 M", "6 M", "1 Y"
         if resolution == '1':
-            # 1-minute bars: return exactly what's requested (max 2 days)
-            if days_diff <= 0.5:
+            # 1-minute bars: limited by IBKR
+            if days_back <= 1:
                 duration = "1 D"
-            elif days_diff <= 2:
+            elif days_back <= 2:
                 duration = "2 D"
             else:
-                duration = "1 W"
+                duration = "1 W"  # Max for 1-min bars
         elif resolution in ['3', '5', '15', '30']:
-            # Intraday bars
-            if days_diff <= 2:
+            # Intraday bars: IBKR can provide up to 3 months for 5-min bars
+            if days_back <= 2:
                 duration = "2 D"
-            elif days_diff <= 7:
+            elif days_back <= 7:
                 duration = "1 W"
-            else:
+            elif days_back <= 30:
                 duration = "1 M"
+            elif days_back <= 90:
+                duration = "3 M"
+            else:
+                duration = "3 M"  # Max for intraday bars
         elif resolution in ['60', '120', '240']:
             # Hourly bars
-            if days_diff <= 7:
+            if days_back <= 7:
                 duration = "1 W"
-            elif days_diff <= 30:
+            elif days_back <= 30:
                 duration = "1 M"
-            else:
+            elif days_back <= 90:
                 duration = "3 M"
+            else:
+                duration = "3 M"  # IBKR limit for hourly
         else:
             # Daily/Weekly/Monthly
-            if days_diff <= 30:
+            if days_back <= 30:
                 duration = "1 M"
-            elif days_diff <= 90:
+            elif days_back <= 90:
                 duration = "3 M"
-            elif days_diff <= 180:
+            elif days_back <= 180:
                 duration = "6 M"
             else:
                 duration = "1 Y"
@@ -396,10 +408,16 @@ async def get_history(
         logger.info(f"🕒 Cache TTL for {symbol} ({resolution}-min): {cache_ttl}s (realtime: {is_realtime_request})")
         
         # Check cache first (only if not a very recent real-time request)
-        cache_key = f"{symbol}_{resolution}_{duration}_{bar_size}"
+        # Include endDateTime in cache key to avoid serving wrong time range
+        end_dt_str = datetime.fromtimestamp(to_timestamp).strftime("%Y%m%d_%H%M%S") if to_timestamp else "current"
+        cache_key = f"{symbol}_{resolution}_{duration}_{bar_size}_{end_dt_str}"
         current_time = time.time()
         
-        if cache_key in _history_cache and not (is_realtime_request and resolution == '1'):
+        # For older data requests (more than 1 day back), don't use cache
+        # This ensures we always fetch fresh data for historical requests
+        is_historical_request = days_diff > 1
+        
+        if cache_key in _history_cache and not (is_realtime_request and resolution == '1') and not is_historical_request:
             cached_data, cache_time = _history_cache[cache_key]
             cache_age = current_time - cache_time
             if cache_age < cache_ttl:
@@ -408,28 +426,37 @@ async def get_history(
                 logger.info(f"📦 CACHE_HIT: Serving {len(cached_data)} cached bars from {datetime.fromtimestamp(cache_time).isoformat()}")
             else:
                 logger.info(f"🔄 Cache expired for {symbol} (age: {cache_age:.1f}s > TTL: {cache_ttl}s), fetching fresh data")
-                logger.info(f"🔄 IBKR_REQUEST: symbol={symbol}, duration={duration}, barSize={bar_size}, rth=True")
+                # Convert to_timestamp to datetime for IBKR endDateTime
+                end_dt = datetime.fromtimestamp(to_timestamp) if to_timestamp else None
+                logger.info(f"🔄 IBKR_REQUEST: symbol={symbol}, duration={duration}, barSize={bar_size}, rth=True, endDateTime={end_dt}")
                 bars = await ib_client.history_bars(
                     symbol=symbol,
                     duration=duration,
                     barSize=bar_size,
-                    rth=True
+                    rth=True,
+                    endDateTime=end_dt
                 )
                 logger.info(f"🔄 IBKR_RESPONSE: Received {len(bars) if bars else 0} bars")
                 if bars:
                     _history_cache[cache_key] = (bars, current_time)
         else:
-            logger.info(f"🆕 {'Real-time' if is_realtime_request else 'Fresh'} data fetch for {symbol}")
-            logger.info(f"🆕 IBKR_REQUEST: symbol={symbol}, duration={duration}, barSize={bar_size}, rth=True")
+            if is_historical_request:
+                logger.info(f"🆕 Historical data fetch for {symbol} (skipping cache, days_diff={days_diff:.1f})")
+            else:
+                logger.info(f"🆕 {'Real-time' if is_realtime_request else 'Fresh'} data fetch for {symbol}")
+            # Convert to_timestamp to datetime for IBKR endDateTime
+            end_dt = datetime.fromtimestamp(to_timestamp) if to_timestamp else None
+            logger.info(f"🆕 IBKR_REQUEST: symbol={symbol}, duration={duration}, barSize={bar_size}, rth=True, endDateTime={end_dt}, days_back={days_back:.1f}")
             bars = await ib_client.history_bars(
                 symbol=symbol,
                 duration=duration,
                 barSize=bar_size,
-                rth=True
+                rth=True,
+                endDateTime=end_dt
             )
             logger.info(f"🆕 IBKR_RESPONSE: Received {len(bars) if bars else 0} bars")
-            # Cache with appropriate TTL
-            if bars:
+            # Cache with appropriate TTL (only for recent data)
+            if bars and not is_historical_request:
                 _history_cache[cache_key] = (bars, current_time)
                 logger.info(f"🆕 CACHED: Stored {len(bars)} bars with TTL {cache_ttl}s")
         
@@ -488,14 +515,16 @@ async def get_history(
                 logger.error(traceback.format_exc())
                 continue
             
-            # Filter bars within requested range
-            if from_timestamp <= bar_timestamp <= to_timestamp:
-                result["t"].append(bar_timestamp)
-                result["o"].append(float(bar.open))
-                result["h"].append(float(bar.high))
-                result["l"].append(float(bar.low))
-                result["c"].append(float(bar.close))
-                result["v"].append(int(bar.volume) if bar.volume else 0)
+            # Include all bars returned by IBKR - don't filter here
+            # IBKR returns data going back from endDateTime by duration
+            # We return all of it, and the frontend will filter to the requested range
+            # This ensures we don't lose data that might be slightly outside the range
+            result["t"].append(bar_timestamp)
+            result["o"].append(float(bar.open))
+            result["h"].append(float(bar.high))
+            result["l"].append(float(bar.low))
+            result["c"].append(float(bar.close))
+            result["v"].append(int(bar.volume) if bar.volume else 0)
         
         logger.info(f"Returning {len(result['t'])} bars for {symbol} from IBKR")
         
