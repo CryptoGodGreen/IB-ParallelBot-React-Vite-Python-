@@ -12,6 +12,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
   const widgetRef = useRef(null);
   const loadingConfigIdRef = useRef(null); // Track which config is currently being loaded
   const savingConfigIdRef = useRef(null); // Track which config is currently being saved
+  const subscribersRef = useRef({}); // Store active subscriptions for real-time updates
   const [isLoading, setIsLoading] = useState(true);
   const [tradingStatus, setTradingStatus] = useState(null);
   const [error, setError] = useState(null);
@@ -529,6 +530,10 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
               }
               
               // Restore all drawings from tradingview_drawings
+              // Track which lines have been restored to avoid duplicates
+              let entryLineRestored = false;
+              let exitLineRestored = false;
+              
               if (savedData.layout_data.other_drawings.tradingview_drawings) {
                 console.log('📥 Found saved drawings, attempting to restore all lines...');
                 
@@ -543,6 +548,45 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                   
                   // Restore each drawing
                   for (const drawing of drawings) {
+                    // Check if this drawing matches entry or exit line coordinates
+                    if (drawing.points && drawing.points.length >= 2 && savedData.layout_data.entry_line) {
+                      const entryP1 = savedData.layout_data.entry_line.p1;
+                      const entryP2 = savedData.layout_data.entry_line.p2;
+                      const drawP1 = drawing.points[0];
+                      const drawP2 = drawing.points[1];
+                      
+                      // Check if coordinates match (within small tolerance)
+                      if (entryP1 && entryP2 && drawP1 && drawP2) {
+                        const timeMatch = Math.abs((drawP1.time || drawP1.x) - entryP1.time) < 60 &&
+                                         Math.abs((drawP2.time || drawP2.x) - entryP2.time) < 60;
+                        const priceMatch = Math.abs((drawP1.price || drawP1.y) - entryP1.price) < 0.01 &&
+                                          Math.abs((drawP2.price || drawP2.y) - entryP2.price) < 0.01;
+                        if (timeMatch && priceMatch) {
+                          entryLineRestored = true;
+                          console.log('📌 Entry line found in tradingview_drawings, will skip manual drawing');
+                        }
+                      }
+                    }
+                    
+                    // Check if this drawing matches exit line coordinates
+                    if (drawing.points && drawing.points.length >= 2 && savedData.layout_data.exit_line) {
+                      const exitP1 = savedData.layout_data.exit_line.p1;
+                      const exitP2 = savedData.layout_data.exit_line.p2;
+                      const drawP1 = drawing.points[0];
+                      const drawP2 = drawing.points[1];
+                      
+                      // Check if coordinates match (within small tolerance)
+                      if (exitP1 && exitP2 && drawP1 && drawP2) {
+                        const timeMatch = Math.abs((drawP1.time || drawP1.x) - exitP1.time) < 60 &&
+                                         Math.abs((drawP2.time || drawP2.x) - exitP2.time) < 60;
+                        const priceMatch = Math.abs((drawP1.price || drawP1.y) - exitP1.price) < 0.01 &&
+                                          Math.abs((drawP2.price || drawP2.y) - exitP2.price) < 0.01;
+                        if (timeMatch && priceMatch) {
+                          exitLineRestored = true;
+                          console.log('📌 Exit line found in tradingview_drawings, will skip manual drawing');
+                        }
+                      }
+                    }
                     // Check if this config is still the one being loaded
                     if (loadingConfigIdRef.current !== configId) {
                       return;
@@ -553,7 +597,34 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                         const point1 = drawing.points[0];
                         const point2 = drawing.points[1];
                         
-                        if (!point1 || !point2 || point1.time === undefined || point1.price === undefined) {
+                        // Validate points
+                        if (!point1 || !point2 || 
+                            point1.time === undefined || point1.price === undefined ||
+                            point2.time === undefined || point2.price === undefined) {
+                          console.warn('⚠️ Invalid drawing points:', drawing.id);
+                          continue;
+                        }
+                        
+                        // Validate timestamp and price values
+                        const time1 = Number(point1.time);
+                        const price1 = Number(point1.price);
+                        const time2 = Number(point2.time);
+                        const price2 = Number(point2.price);
+                        
+                        if (!isFinite(time1) || !isFinite(price1) || !isFinite(time2) || !isFinite(price2)) {
+                          console.warn('⚠️ Invalid drawing point values:', drawing.id, { time1, price1, time2, price2 });
+                          continue;
+                        }
+                        
+                        // Validate timestamp is not too old or in the future
+                        const now = Date.now() / 1000;
+                        const maxAge = 365 * 24 * 60 * 60; // 1 year in seconds
+                        if (time1 < now - maxAge || time1 > now + 86400 || 
+                            time2 < now - maxAge || time2 > now + 86400) {
+                          console.warn('⚠️ Drawing timestamp out of range:', drawing.id, {
+                            time1: new Date(time1 * 1000).toISOString(),
+                            time2: new Date(time2 * 1000).toISOString()
+                          });
                           continue;
                         }
                         
@@ -561,8 +632,8 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                         if (typeof chart.createMultipointShape === 'function') {
                           const shape = chart.createMultipointShape(
                             [
-                              { time: point1.time, price: point1.price },
-                              { time: point2.time, price: point2.price }
+                              { time: time1, price: price1 },
+                              { time: time2, price: price2 }
                             ],
                             {
                               shape: drawing.name || 'trend_line',
@@ -579,7 +650,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                         } else if (typeof chart.createShape === 'function') {
                           // Fallback to createShape + setPoint
                           const shape = chart.createShape(
-                            { time: point1.time, price: point1.price },
+                            { time: time1, price: price1 },
                             {
                               shape: drawing.name || 'trend_line',
                               lock: false,
@@ -592,7 +663,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                           );
                           
                           if (shape && typeof shape.setPoint === 'function') {
-                            shape.setPoint(1, { time: point2.time, price: point2.price });
+                            shape.setPoint(1, { time: time2, price: price2 });
                             if (typeof shape.complete === 'function') {
                               shape.complete();
                             }
@@ -618,12 +689,51 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
             }
             
             // Fallback: Draw the lines manually on the chart (entry/exit lines)
+            // Wait for chart to be fully ready and data to be loaded before drawing
             try {
               if (widgetRef.current && widgetRef.current.chart) {
+                // Wait longer for chart to be ready and initial data to load
+                // This ensures TradingView has finished loading data before we draw
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // Check again if chart is still available
+                if (!widgetRef.current || !widgetRef.current.chart) {
+                  console.log('⚠️ Chart no longer available after wait');
+                  return;
+                }
+                
                 const chart = widgetRef.current.chart();
                 
-                // Draw entry line
-                if (savedData.layout_data.entry_line && savedData.layout_data.entry_line.p1 && savedData.layout_data.entry_line.p2) {
+                // Verify chart methods are available
+                if (!chart || (typeof chart.createMultipointShape !== 'function' && typeof chart.createShape !== 'function')) {
+                  console.log('⚠️ Chart drawing methods not available');
+                  return;
+                }
+                
+                // Wait for chart to have visible range (data is loaded)
+                let retries = 0;
+                while (retries < 10) {
+                  try {
+                    if (typeof chart.getVisibleRange === 'function') {
+                      const visibleRange = chart.getVisibleRange();
+                      if (visibleRange && visibleRange.from && visibleRange.to) {
+                        console.log('✅ Chart has visible range, ready to draw');
+                        break;
+                      }
+                    }
+                  } catch (e) {
+                    // getVisibleRange might not be available or might throw
+                  }
+                  await new Promise(resolve => setTimeout(resolve, 200));
+                  retries++;
+                }
+                
+                if (retries >= 10) {
+                  console.log('⚠️ Chart visible range not available after waiting');
+                }
+                
+                // Draw entry line (only if not already restored from tradingview_drawings)
+                if (!entryLineRestored && savedData.layout_data.entry_line && savedData.layout_data.entry_line.p1 && savedData.layout_data.entry_line.p2) {
                   console.log('📈 Drawing entry line...');
                   try {
                       // Use createMultipointShape if available to create complete line in one call
@@ -685,13 +795,13 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                   }
                 }
                 
-                // Draw exit line
-                if (savedData.layout_data.exit_line && savedData.layout_data.exit_line.p1 && savedData.layout_data.exit_line.p2) {
+                // Draw exit line (only if not already restored from tradingview_drawings)
+                if (!exitLineRestored && savedData.layout_data.exit_line && savedData.layout_data.exit_line.p1 && savedData.layout_data.exit_line.p2) {
                   console.log('📈 Drawing exit line...');
                   try {
                       // Use createMultipointShape if available to create complete line in one call
                     if (typeof chart.createMultipointShape === 'function') {
-                      chart.createMultipointShape(
+                      const exitShape = chart.createMultipointShape(
                         [
                           { time: savedData.layout_data.exit_line.p1.time, price: savedData.layout_data.exit_line.p1.price },
                           { time: savedData.layout_data.exit_line.p2.time, price: savedData.layout_data.exit_line.p2.price }
@@ -709,7 +819,11 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                           }
                         }
                       );
-                      console.log('✅ Exit line drawn successfully');
+                      if (exitShape) {
+                        console.log('✅ Exit line drawn successfully, shape ID:', exitShape.id || 'no-id');
+                      } else {
+                        console.warn('⚠️ Exit line createMultipointShape returned null/undefined');
+                      }
                     } else {
                       // Fallback to createShape + setPoint
                       const exitLine = chart.createShape(
@@ -800,6 +914,16 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                 }
                 
                 console.log('✅ All lines drawn successfully');
+                
+                // Verify shapes were actually created
+                await new Promise(resolve => setTimeout(resolve, 500));
+                if (typeof chart.getAllShapes === 'function') {
+                  const shapesAfterDraw = chart.getAllShapes();
+                  console.log('🔍 Shapes count after drawing:', shapesAfterDraw.length);
+                  if (shapesAfterDraw.length === 0) {
+                    console.warn('⚠️ No shapes found after drawing - shapes may have been cleared');
+                  }
+                }
               } else {
                 console.log('⚠️ Chart not available for drawing');
               }
@@ -929,8 +1053,8 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           return;
         }
 
-        // Store active subscriptions for real-time updates
-        const subscribers = {};
+        // Reset subscribers for this widget instance
+        subscribersRef.current = {};
         
         // Custom UDF-compatible datafeed
         const datafeed = {
@@ -986,41 +1110,106 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           getBars: (symbolInfo, resolution, periodParams, onHistoryCallback, onErrorCallback) => {
             const { from, to, firstDataRequest, countBack } = periodParams;
             
-            // Expand time window for intraday resolutions to ensure continuous data
-            // This helps avoid gaps when TradingView requests small time windows
+            // For the first request, use what TradingView asks for (or slightly more)
+            // For subsequent requests (scrolling), expand more aggressively
             let adjustedFrom = from;
             let adjustedTo = to;
             const resolutionMinutes = parseInt(resolution) || 1;
             const timeWindow = to - from;
+            const now = Math.floor(Date.now() / 1000);
             
-            // For intraday resolutions (1m, 5m, 15m, 30m), ensure we request at least enough data
-            // to fill the visible chart area plus some buffer
-            if (resolutionMinutes <= 60 && timeWindow < 86400) { // Less than 1 day for intraday
-              // Request at least 2 days of data for intraday charts to ensure continuity
-              const minWindow = 2 * 86400; // 2 days in seconds
-              const centerTime = (from + to) / 2;
-              adjustedFrom = centerTime - (minWindow / 2);
-              adjustedTo = centerTime + (minWindow / 2);
+            if (firstDataRequest) {
+              // First request: request a reasonable amount of data upfront to avoid multiple small requests
+              // For 5-minute charts, request ~2 days of data (about 500-600 bars)
+              // This is enough to show a good initial view without being too slow
+              const resolutionMinutes = parseInt(resolution) || 1;
+              let initialDays = 1; // Default to 1 day
               
-              // Don't go into the future
-              const now = Math.floor(Date.now() / 1000);
-              if (adjustedTo > now) {
-                adjustedTo = now;
-                adjustedFrom = adjustedTo - minWindow;
+              if (resolutionMinutes <= 1) {
+                initialDays = 0.5; // 12 hours for 1-minute charts
+              } else if (resolutionMinutes <= 5) {
+                initialDays = 2; // 2 days for 5-minute charts (~576 bars)
+              } else if (resolutionMinutes <= 15) {
+                initialDays = 3; // 3 days for 15-minute charts
+              } else if (resolutionMinutes <= 60) {
+                initialDays = 7; // 1 week for hourly charts
+              } else {
+                initialDays = 30; // 1 month for daily charts
+              }
+              
+              const initialWindow = initialDays * 86400; // Convert days to seconds
+              adjustedFrom = Math.max(from, now - initialWindow);
+              adjustedTo = Math.min(to, now);
+              
+              // Ensure we don't request more than what TradingView asked for on the "to" side
+              // But expand backward to get more historical data
+              if (to < now) {
+                adjustedTo = to;
+                adjustedFrom = Math.max(from, adjustedTo - initialWindow);
+              }
+            } else {
+              // Subsequent requests (user scrolling): expand to ensure we get enough data
+              // When scrolling left, we need to request older data
+              const maxExpansionDays = resolutionMinutes <= 5 ? 5 : resolutionMinutes <= 15 ? 10 : 20;
+              const maxExpansion = maxExpansionDays * 86400;
+              
+              // When requesting older data (scrolling left), expand backward significantly
+              if (from < now - 86400) {
+                // For older data requests, expand backward more aggressively
+                // Request at least 2-3 days of data to ensure continuity
+                const backwardExpansion = Math.min(maxExpansion, (now - from) * 0.5);
+                adjustedFrom = from - backwardExpansion;
+                adjustedTo = to + Math.min(86400, timeWindow * 0.2); // Small forward buffer
+                
+                // Don't go into the future
+                if (adjustedTo > now) {
+                  adjustedTo = now;
+                  adjustedFrom = Math.max(from - backwardExpansion, adjustedTo - maxExpansion);
+                }
+              } else {
+                // Recent data: add moderate buffer
+                const buffer = Math.min(timeWindow * 0.5, 86400);
+                adjustedFrom = from - buffer;
+                adjustedTo = to + buffer;
+                
+                if (adjustedTo > now) {
+                  adjustedTo = now;
+                  adjustedFrom = from - buffer;
+                }
               }
             }
             
             // Use countback if provided and reasonable (for bar count requests)
             const countbackParam = countBack && countBack > 0 && countBack <= 500 ? `&countback=${countBack}` : '';
 
-            fetch(`${API_BASE_URL}/udf/history?symbol=${symbolInfo.name}&from_timestamp=${Math.floor(adjustedFrom)}&to_timestamp=${Math.floor(adjustedTo)}&resolution=${resolution}${countbackParam}`)
+            console.log('[getBars]: Request', {
+              symbol: symbolInfo.name,
+              resolution,
+              firstDataRequest,
+              from: new Date(from * 1000).toISOString(),
+              to: new Date(to * 1000).toISOString(),
+              adjustedFrom: new Date(adjustedFrom * 1000).toISOString(),
+              adjustedTo: new Date(adjustedTo * 1000).toISOString(),
+              timeWindow: `${((adjustedTo - adjustedFrom) / 86400).toFixed(1)} days`
+            });
+
+            // Add timeout to prevent hanging requests (longer for initial load)
+            const controller = new AbortController();
+            const timeoutDuration = firstDataRequest ? 60000 : 30000; // 60s for first, 30s for subsequent
+            const timeoutId = setTimeout(() => controller.abort(), timeoutDuration);
+
+            fetch(`${API_BASE_URL}/udf/history?symbol=${symbolInfo.name}&from_timestamp=${Math.floor(adjustedFrom)}&to_timestamp=${Math.floor(adjustedTo)}&resolution=${resolution}${countbackParam}`, {
+              signal: controller.signal
+            })
               .then(response => {
+                clearTimeout(timeoutId);
                 if (!response.ok) {
-                  throw new Error(`HTTP ${response.status}`);
+                  throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
                 return response.json();
               })
               .then(data => {
+                clearTimeout(timeoutId);
                 console.log('[getBars]: Data received', {
                   status: data.s,
                   bars: data.t?.length || 0,
@@ -1029,37 +1218,125 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
                 });
                 
                 if (data.s === 'ok' && data.t && data.t.length > 0) {
-                  const bars = data.t.map((time, index) => ({
-                    time: time * 1000,
-                    open: data.o[index],
-                    high: data.h[index],
-                    low: data.l[index],
-                    close: data.c[index],
-                    volume: data.v[index]
-                  }));
-                  
-                  // Sort bars by time (ascending)
-                  bars.sort((a, b) => a.time - b.time);
-                  
-                  console.log('[getBars]: Returning', bars.length, 'bars');
-                  console.log('[getBars]: First bar:', new Date(bars[0].time).toISOString());
-                  console.log('[getBars]: Last bar:', new Date(bars[bars.length - 1].time).toISOString());
-                  console.log('[getBars]: Requested from:', new Date(from * 1000).toISOString());
-                  console.log('[getBars]: Requested to:', new Date(to * 1000).toISOString());
-                  
-                  // Always tell TradingView there might be more data (noData: false)
-                  // This allows continuous loading when panning
-                  onHistoryCallback(bars, { noData: false });
+                  try {
+                    const bars = data.t.map((time, index) => {
+                      // Validate and convert timestamp
+                      const timestamp = time * 1000;
+                      if (!isFinite(timestamp) || timestamp < 0) {
+                        console.warn('[getBars]: Invalid timestamp:', time);
+                        return null;
+                      }
+                      
+                      // Validate OHLCV data
+                      const open = parseFloat(data.o[index]);
+                      const high = parseFloat(data.h[index]);
+                      const low = parseFloat(data.l[index]);
+                      const close = parseFloat(data.c[index]);
+                      const volume = parseFloat(data.v?.[index] || 0);
+                      
+                      if (!isFinite(open) || !isFinite(high) || !isFinite(low) || !isFinite(close)) {
+                        console.warn('[getBars]: Invalid OHLC data at index:', index);
+                        return null;
+                      }
+                      
+                      return {
+                        time: timestamp,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume: isFinite(volume) ? volume : 0
+                      };
+                    }).filter(bar => bar !== null); // Remove invalid bars
+                    
+                    if (bars.length === 0) {
+                      console.warn('[getBars]: No valid bars after filtering');
+                      onHistoryCallback([], { noData: true });
+                      return;
+                    }
+                    
+                    // Sort bars by time (ascending)
+                    bars.sort((a, b) => a.time - b.time);
+                    
+                    // Filter bars to match the requested range
+                    // TradingView expects data within the requested range for incremental updates
+                    const requestedFromMs = from * 1000;
+                    const requestedToMs = to * 1000;
+                    
+                    // Filter bars that are within the requested range
+                    // Don't add buffer - TradingView needs exact range for incremental updates
+                    const filteredBars = bars.filter(bar => {
+                      return bar.time >= requestedFromMs && bar.time <= requestedToMs;
+                    });
+                    
+                    // Check if we have data that goes beyond the requested range
+                    // This helps TradingView know there's more data available
+                    const firstBarTime = bars[0].time / 1000;
+                    const lastBarTime = bars[bars.length - 1].time / 1000;
+                    const hasOlderData = firstBarTime < from;
+                    const hasNewerData = lastBarTime > to;
+                    
+                    // Use filtered bars if we have any, otherwise use all bars (for first request)
+                    const barsToReturn = filteredBars.length > 0 ? filteredBars : (firstDataRequest ? bars : []);
+                    
+                    console.log('[getBars]: Raw bars:', bars.length, 'Filtered bars:', filteredBars.length, 'Returning:', barsToReturn.length);
+                    if (barsToReturn.length > 0) {
+                      console.log('[getBars]: First bar:', new Date(barsToReturn[0].time).toISOString());
+                      console.log('[getBars]: Last bar:', new Date(barsToReturn[barsToReturn.length - 1].time).toISOString());
+                      console.log('[getBars]: Requested from:', new Date(requestedFromMs).toISOString());
+                      console.log('[getBars]: Requested to:', new Date(requestedToMs).toISOString());
+                      console.log('[getBars]: Has older data:', hasOlderData, 'Has newer data:', hasNewerData);
+                    }
+                    
+                    // Always indicate noData: false when we have any bars at all
+                    // This tells TradingView the datafeed is working and more data might be available
+                    // TradingView will continue requesting data when scrolling if noData is false
+                    // Even if filtered bars are empty, if we have raw bars, there might be more data
+                    const hasData = bars.length > 0;
+                    onHistoryCallback(barsToReturn, { 
+                      noData: !hasData
+                    });
+                  } catch (processError) {
+                    console.error('[getBars]: Error processing bars:', processError);
+                    onHistoryCallback([], { noData: true });
+                  }
                 } else if (data.s === 'no_data') {
+                  console.log('[getBars]: No data available');
                   onHistoryCallback([], { noData: true });
                 } else if (data.s === 'error') {
-                  onErrorCallback(data.errmsg || 'Unknown error');
+                  console.error('[getBars]: Backend error:', data.errmsg);
+                  // For first request errors, return empty data instead of error to allow chart to initialize
+                  if (firstDataRequest) {
+                    console.warn('[getBars]: First request error, returning empty data to allow initialization');
+                    onHistoryCallback([], { noData: true });
+                  } else {
+                    onErrorCallback(data.errmsg || 'Unknown error');
+                  }
                 } else {
-                  onErrorCallback('Invalid data format');
+                  console.error('[getBars]: Invalid data format:', data);
+                  // For first request, return empty data instead of error
+                  if (firstDataRequest) {
+                    console.warn('[getBars]: Invalid data format on first request, returning empty data');
+                    onHistoryCallback([], { noData: true });
+                  } else {
+                    onErrorCallback('Invalid data format');
+                  }
                 }
               })
               .catch(error => {
-                onErrorCallback(error.message);
+                clearTimeout(timeoutId);
+                console.error('[getBars]: Fetch error:', error);
+                // For first request errors, return empty data to allow chart to initialize
+                if (firstDataRequest) {
+                  console.warn('[getBars]: First request fetch error, returning empty data to allow initialization:', error.message);
+                  onHistoryCallback([], { noData: true });
+                } else {
+                  if (error.name === 'AbortError') {
+                    onErrorCallback('Request timeout - data range may be too large');
+                  } else {
+                    onErrorCallback(error.message || 'Failed to fetch historical data');
+                  }
+                }
               });
           },
 
@@ -1191,7 +1468,7 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
             const intervalId = setInterval(updateBar, pollInterval);
             
             // Store subscription
-            subscribers[subscriberUID] = {
+            subscribersRef.current[subscriberUID] = {
               intervalId,
               symbolInfo,
               resolution,
@@ -1204,10 +1481,10 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
           unsubscribeBars: (subscriberUID) => {
             console.log('[unsubscribeBars]: Method called', subscriberUID);
             
-            const subscription = subscribers[subscriberUID];
+            const subscription = subscribersRef.current[subscriberUID];
             if (subscription) {
               clearInterval(subscription.intervalId);
-              delete subscribers[subscriberUID];
+              delete subscribersRef.current[subscriberUID];
               console.log(`[unsubscribeBars]: Stopped polling for subscriber ${subscriberUID}`);
             }
           },
@@ -1345,12 +1622,13 @@ const TradingViewWidget = ({ selectedConfig, onSaveDrawings, onLoadDrawings, onS
       // Use setTimeout to defer cleanup and avoid React conflicts
       setTimeout(() => {
         // Clear all subscriptions
-        Object.keys(subscribers || {}).forEach(subscriberUID => {
-          const subscription = subscribers[subscriberUID];
+        Object.keys(subscribersRef.current || {}).forEach(subscriberUID => {
+          const subscription = subscribersRef.current[subscriberUID];
           if (subscription && subscription.intervalId) {
             clearInterval(subscription.intervalId);
           }
         });
+        subscribersRef.current = {};
         
         if (widget) {
           try {

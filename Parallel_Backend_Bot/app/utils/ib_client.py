@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from typing import Dict, Optional, List
+from datetime import datetime
 from ib_async import IB, Stock, Contract, ContractDetails, MarketOrder, LimitOrder, StopLimitOrder, Ticker
 from app.config import settings
 
@@ -174,14 +175,33 @@ class IBClient:
         await asyncio.sleep(2) 
         return tickers
 
-    async def history_bars(self, symbol: str, duration: str, barSize: str, rth: bool):
+    async def history_bars(self, symbol: str, duration: str, barSize: str, rth: bool, endDateTime=None):
         await self.ensure_connected()
         c = await self.qualify_stock(symbol)
         if not c: return []
+        
+        # If endDateTime is provided, use it; otherwise use empty string (current time)
+        # endDateTime should be a datetime object or None
+        # ib_async expects endDateTime as a datetime object or empty string
+        end_dt_str = ""
+        if endDateTime:
+            if isinstance(endDateTime, datetime):
+                end_dt_str = endDateTime
+            else:
+                # Convert to datetime if it's a string
+                end_dt_str = datetime.fromisoformat(str(endDateTime))
+        
+        logger.info(f"🔍 IBKR history_bars call: symbol={symbol}, duration={duration}, barSize={barSize}, rth={rth}, endDateTime={end_dt_str}")
+        
         bars = await self.ib.reqHistoricalDataAsync(
-            c, endDateTime="", durationStr=duration, barSizeSetting=barSize,
+            c, endDateTime=end_dt_str, durationStr=duration, barSizeSetting=barSize,
             whatToShow="TRADES", useRTH=rth, formatDate=2, keepUpToDate=False
         )
+        
+        logger.info(f"🔍 IBKR returned {len(bars) if bars else 0} bars")
+        if bars and len(bars) > 0:
+            logger.info(f"🔍 First bar date: {bars[0].date}, Last bar date: {bars[-1].date}")
+        
         return bars
 
     async def place_order(self, contract: Contract, order):
